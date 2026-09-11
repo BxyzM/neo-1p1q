@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import csv
 from datetime import datetime, timezone
+import io
 import json
 from pathlib import Path
 import pickle
@@ -17,11 +18,17 @@ import shutil
 import tempfile
 from typing import Any
 
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 import numpy as np
 from omegaconf import OmegaConf
+import pennylane as qml
 from sklearn.metrics import roc_auc_score, roc_curve
 
 import helpers.utils as ut
+from helpers.trained_run import load_circuit_snapshot
+from quantum.circuits.base import CircuitWeights
 
 
 SCHEMA_VERSION = 1
@@ -88,8 +95,8 @@ def _compile_times(path: Path) -> dict[str, float]:
         return {row["step"]: float(row["seconds"]) for row in csv.DictReader(stream)}
 
 
-def _training_metadata(path: Path) -> tuple[int | None, str | None]:
-    """Read completion metadata from a certified trained-model payload."""
+def _training_metadata(path: Path) -> tuple[int | None, str | None, dict[str, Any]]:
+    """Read completion metadata and final aux weights from a certified trained-model payload."""
     payload = _load_pickle(path)
     if not isinstance(payload, dict) or not isinstance(payload.get("training"), dict):
         raise ValueError("trained model does not contain training metadata")
@@ -100,7 +107,15 @@ def _training_metadata(path: Path) -> tuple[int | None, str | None]:
     stop_reason = training.get("stop_reason")
     if not isinstance(stop_reason, str) or not stop_reason:
         raise ValueError("stop reason is invalid")
-    return completed, stop_reason
+    aux = getattr(payload.get("weights"), "aux", None)
+    if not isinstance(aux, dict) or not {"scale_factor", "bias", "hamiltonian_coeffs"} <= aux.keys():
+        raise ValueError("trained model is missing expected auxiliary weights")
+    aux_weights = {
+        "scale_factor": float(aux["scale_factor"]),
+        "bias": float(aux["bias"]),
+        "hamiltonian_coeffs": [float(value) for value in np.asarray(aux["hamiltonian_coeffs"]).reshape(-1)],
+    }
+    return completed, stop_reason, aux_weights
 
 
 def _score_histogram(
@@ -332,6 +347,7 @@ def _run_report(run_dir: Path, result_dir: Path) -> tuple[dict[str, Any], dict[s
     wandb_run_id = None
     epoch_times: list[dict[str, float | int]] = []
     compile_times: dict[str, float] = {}
+    aux_weights: dict[str, Any] = {}
 
     config_path = run_dir / "config.yaml"
     if config_path.is_file():
@@ -376,7 +392,7 @@ def _run_report(run_dir: Path, result_dir: Path) -> tuple[dict[str, Any], dict[s
     model_path = run_dir / "trained_model.pickle"
     if model_path.is_file():
         try:
-            completed_epochs, stop_reason = _training_metadata(model_path)
+            completed_epochs, stop_reason, aux_weights = _training_metadata(model_path)
         except Exception:
             notices.append(_notice("Training metadata is malformed."))
     else:
@@ -412,6 +428,7 @@ def _run_report(run_dir: Path, result_dir: Path) -> tuple[dict[str, Any], dict[s
         "test_auc": test_auc,
         "evaluation_jets": evaluation_jets,
         "wandb_run_id": wandb_run_id,
+        "aux_weights": aux_weights,
         "notices": notices,
         "validation_auc": validation_auc,
         "roc_points": roc_points,
@@ -421,7 +438,59 @@ def _run_report(run_dir: Path, result_dir: Path) -> tuple[dict[str, Any], dict[s
     }, cfg
 
 
-def build_experiment(experiment_dir: Path, results_dir: Path) -> dict[str, Any]:
+def _circuit_diagram_png(run_dir: Path, cfg: dict[str, Any]) -> bytes:
+    """Draw the circuit's structure (not trained values) via qml.draw_mpl.
+
+    Uses the run's own saved circuit snapshot (not the live quantum.circuits
+    package) so the diagram matches what that run actually trained, and dummy
+    zero-valued weights/inputs -- only the circuit's shape is drawn, so their
+    values never matter.
+    """
+    registry = load_circuit_snapshot(run_dir)
+    circuit_impl = registry.get(cfg["circuit_type"], cfg["num_layers"])
+    if cfg.get("operations_per_qubit"):
+        circuit_impl.operations_per_qubit = cfg["operations_per_qubit"]
+    wires, num_layers = cfg["wires"], cfg["num_layers"]
+    wires_list = list(range(wires))
+
+    aux = dict(circuit_impl.aux_defaults)
+    for name in circuit_impl.aux_per_wire_names:
+        aux[name] = [aux[name]] * wires
+    weights = CircuitWeights(rot=np.zeros((num_layers, wires, circuit_impl.operations_per_qubit)), aux=aux)
+    dummy_inputs = np.zeros((1, wires * num_layers, 3))
+
+    device = qml.device("default.qubit", wires=wires, shots=None)
+
+    def circuit_fn(weights: CircuitWeights, inputs: np.ndarray) -> Any:
+        return circuit_impl.build(weights, inputs, wires_list)
+
+    qnode = qml.QNode(circuit_fn, device)
+    fig, _ = qml.draw_mpl(qnode, decimals=None, style="black_white_dark")(weights, dummy_inputs)
+    try:
+        buffer = io.BytesIO()
+        fig.savefig(buffer, format="png", dpi=150, bbox_inches="tight", facecolor=fig.get_facecolor())
+        return buffer.getvalue()
+    finally:
+        plt.close(fig)
+
+
+def _render_circuit_diagram(run_directories: list[Path]) -> bytes | None:
+    """Render the circuit from the first run whose config and circuit snapshot
+    both load; the circuit structure is shared across every run in an
+    experiment, so one diagram represents the whole experiment."""
+    for run_dir in run_directories:
+        config_path = run_dir / "config.yaml"
+        if not config_path.is_file():
+            continue
+        try:
+            cfg = _load_config(config_path)
+            return _circuit_diagram_png(run_dir, cfg)
+        except Exception:
+            continue
+    return None
+
+
+def build_experiment(experiment_dir: Path, results_dir: Path, output_dir: Path) -> dict[str, Any]:
     """Build one experiment document from every numeric random-seed directory."""
     experiment_id = experiment_dir.name
     notices: list[dict[str, str]] = []
@@ -434,6 +503,16 @@ def build_experiment(experiment_dir: Path, results_dir: Path) -> dict[str, Any]:
                 f"Ignored nonnumeric saved-run directory '{child.name}'.", "info",
             ))
     run_directories.sort(key=lambda path: (int(path.name), path.name))
+
+    circuit_diagram = None
+    circuit_diagram_png = _render_circuit_diagram(run_directories)
+    if circuit_diagram_png is not None:
+        circuit_diagram = f"data/circuits/{experiment_id}.png"
+        destination = output_dir / "data" / "circuits" / f"{experiment_id}.png"
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(circuit_diagram_png)
+    elif run_directories:
+        notices.append(_notice("Circuit diagram could not be generated.", "info"))
 
     matching_results = results_dir / experiment_id
     if matching_results.is_dir():
@@ -507,6 +586,7 @@ def build_experiment(experiment_dir: Path, results_dir: Path) -> dict[str, Any]:
         "schema_version": SCHEMA_VERSION,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "experiment": {"id": experiment_id, "status": status},
+        "circuit_diagram": circuit_diagram,
         "summary": {
             "run_count": len(runs),
             "successful_runs": len(successful_runs),
@@ -605,7 +685,7 @@ def publish_reports(
         key=lambda path: (int(path.name), path.name), reverse=True,
     )
     for experiment_dir in experiment_directories:
-        report = build_experiment(experiment_dir, results_dir)
+        report = build_experiment(experiment_dir, results_dir, output_dir)
         _write_json_atomic(output_dir / "data" / f"{experiment_dir.name}.json", report)
         experiments.append(_index_entry(report))
 
