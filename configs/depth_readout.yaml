@@ -1,0 +1,36 @@
+# Same-particle Top/QCD study, independently of the legacy train.py workflow.
+output_dir: ./saved_models/depth_readout
+depths: [1, 2, 3, 5, 8, 12, 16, 24, 32, 48, 64, 96, 128]
+readouts: [z0, all_z, all_z_zz]
+seeds: [12345, 23456, 34567, 45678, 56789]
+datasets:
+  jetclass:
+    cache: /ceph/mbinder/JetGame/processed/features/jetclass_1p1q_10.h5
+    max_train_events: 200000
+    max_valid_events: null  # full 1M-event Top/QCD validation split
+  jetgame:
+    cache: /ceph/mbinder/JetGame/processed/features/one_p_one_q_10_500GeV.h5
+    max_train_events: 200000
+    max_valid_events: 100000
+circuit:
+  wires: 10
+  device_name: default.qubit
+  diff_method: backprop
+  shots: null
+  interface: torch
+  input_angle_scale: 3.926990817
+training:
+  epochs: 25
+  warmup_epochs: 5
+  initial_lr: 0.001
+  peak_lr: 0.005
+  final_lr: 0.001
+  weight_decay: 0.0001  # only bias and trainable readout coefficients
+  batch_size: 1024    # events per AdamW update, including weighted partial batch
+  microbatch_size: 64 # two workers per 48 GB GPU; 16 microbatches per update
+  eval_batch_size: 1024
+  precision: float32
+  torch_device: cuda:0
+  threads: 1
+loader:
+  block_rows: 65536

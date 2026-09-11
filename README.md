@@ -2,6 +2,10 @@
 
 1P1Q trains and evaluates a variational quantum classifier on JetClass HDF5 data.
 
+For the JetClass/JetGame same-particle reuploading study (L=1–128, three readouts,
+five seeds, PennyLane `default.qubit` with JAX/JIT or Torch backprop and analytic shots),
+see [the depth/readout protocol and four launch commands](configs/DEPTH_READOUT.md).
+
 ## Installation
 
 Create the project environment and install its dependencies. This targets the recommended, GPU-accelerated JAX backend; PennyLane Autograd (CPU-only, needed for finite-shot runs) works in the same environment:

@@ -67,7 +67,8 @@ class VQCCircuit(CircuitBase):
     def rotate(self, weights: CircuitWeights, layer: int, wires: List[int]) -> None:
         rot_z, rot_y, rot_x = (weights.rot[layer, :, i] for i in range(3))
         for rz, ry, rx, w in zip(rot_z, rot_y, rot_x, wires):
-            qml.Rot(0., ry, rz, wires=w)
+            # Keep the fixed zero on the active interface/device (also Torch).
+            qml.Rot(0. * ry, ry, rz, wires=w)
             qml.RX(rx, wires=w)
 
     def measure(self, weights: CircuitWeights, wires: List[int]) -> qml.measurements.ExpectationMP:

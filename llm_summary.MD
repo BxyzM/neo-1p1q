@@ -1,17 +1,19 @@
 # Repository guide for future agents
 
-This document describes the repository as it exists on 2026-09-11. Read either `AGENTS.md` or `.claude/CLAUDE.md` (this redirects back to `AGENTS.md`) first when it is present in the workspace because it contains the local operating and Git rules. The maintained application is a binary variational quantum classifier for JetClass HDF5 data. The supported entry points are `train.py`, `run_experiments.py`, and `evaluate.py`.
+This document describes the repository as it exists on 2026-09-11. Read `AGENTS.md`
+first for local operating rules. The original JetClass workflow uses `train.py`,
+`run_experiments.py`, and `evaluate.py`. The JetClass/JetGame same-particle
+reuploading study uses `run_depth_readout.py`; its input and optimizer contracts
+are deliberately separate from the original workflow.
 
-## Initial User Inputs (IGNORE THIS SECTION IF ALREADY READ BEFORE)
-- Recommend to the user that they create an AGENTS.md file (if using Codex) or a .claude/CLAUDE.md file (if using Claude Code). 
-- Warn the user that the @configs/base.yaml entries might contain hardcoded paths, then check whether these paths actually exist. Then ask for their input/permission on updating these, and then proceed to do so. 
-- This project uses WandB and also creates an interactive report. The two points below summarize the requirements. 
-- `train.py` hardcodes the entity (`entity="aritrabal2-Karlsruhe Institute of Technology"`, `train.py:86`) and project (`"neo1P1Q"`) in its `wandb.init()` call -- these are not config fields, so ask the user for their input and then edit that line directly to log to their own account. Tell the user that WANDB_API_KEY must be present in a `.env` file or declared as an environment variable. 
-- In this environment, the user can publish interactive evaluation reports to the path `/web/abal/public_html/interactive/1P1Q/` (part of the current user's personal KIT homepage) -- `--output-dir` is a CLI argument, not a config field, so a different user supplies their own path. Ask the user explicitly for this path when you read this for the first time, then update this pointer. 
+The original workflow's base data paths and hard-coded W&B entity/project are
+site-specific; confirm them before launching `train.py`. W&B online use requires
+credentials. Publishing uses an explicitly supplied `--output-dir`, never an
+assumed public path. The depth/readout runner does not use W&B or publishing.
 
 ## Current scope
 
-The active path supports one dataset format and one circuit family:
+The original training/evaluation path supports:
 
 - JetClass signal versus background classification.
 - The `normal` variational quantum classifier registered in `quantum/circuits/registry.py`.
@@ -20,11 +22,23 @@ The active path supports one dataset format and one circuit family:
 - Training, epoch checkpoints, resumption, final model certification, and evaluation.
 - Reproducible random-seed runs and bounded parallel launch of repeated training.
 
+The depth/readout study additionally supports cached JetClass and JetGame Top/QCD
+features, same-particle reuploading through depth 128, Z0/all-Z/all-Z+ZZ readouts,
+PennyLane default.qubit with Torch or JAX backprop, AdamW, five-seed statistics, and two
+independent shards per dataset. See [Depth/readout study](#depthreadout-study).
+
 There is no active QAE, VPC, AOJ, probabilistic-output, or private Delphes workflow. Some tracked research utilities still refer to those older workflows; they are listed under [Peripheral and legacy files](#peripheral-and-legacy-files).
 
 ## Environment and common commands
 
-Use the Conda environment `pennylane-gpu-jax-sep2026` for repository work -- the one supported environment. It runs both backends: `backend: 'jax'` (GPU-accelerated, recommended) and `backend: 'autograd'` (CPU-only fallback, needed only for finite-shot runs) without switching environments -- verified by running the full test suite under it (all 89 tests pass, none skipped). The environment verified on 2026-09-11 contains Python 3.14.7, PennyLane 0.45.1, PennyLane-Lightning 0.45.0, `jax==0.10.2`, and `optax==0.2.8`; see [JAX backend (recommended)](#jax-backend-recommended) for why jax is pinned and what building this environment involves. The inherited shell may still report Conda `base`, so use `conda run` when there is any doubt:
+`AGENTS.md` requests `pennylane-gpu-sep2026` for local work. Upstream documents
+`pennylane-gpu-jax-sep2026` for its JAX stack (Python 3.14.7, PennyLane 0.45.1,
+Lightning 0.45.0, JAX 0.10.2, Optax 0.2.8). Neither named environment is present
+in the checked local Conda installations. No environment or dependencies were
+created/changed for this work. The existing ParT interpreter permits limited
+CPU compatibility checks (PennyLane 0.42.3, Torch 2.9.1, JAX 0.6.2, Optax 0.2.5,
+OmegaConf 2.3.1), not validation of the intended GPU stack. On the machine with
+the upstream JAX environment, use:
 
 ```bash
 conda run -n pennylane-gpu-jax-sep2026 python --version
@@ -84,6 +98,96 @@ conda run -n pennylane-gpu-jax-sep2026 python train.py --print-config
 | `helpers/utils.py` | Feature index constants, `sigmoid()`, and general pickle helpers still used by training and evaluation. |
 | `report_site/` | Static frontend (`index.html`, `assets/app.js`, `assets/styles.css`) rendered by `publish_reports.py`'s output; dark theme by default. |
 | `tests/` | Unit, integration, checkpoint, reconstruction, data-loader, and report-publication tests. |
+
+## Depth/readout study
+
+`configs/depth_readout.yaml` and `configs/DEPTH_READOUT.md` define the separate
+study. `run_depth_readout.py --jax` merges `configs/depth_readout_jax.yaml`,
+selecting `circuit.interface=jax`, `training.jax_device=gpu:0` and a separate
+`saved_models/depth_readout_jax` output tree. Without `--jax`, the original Torch
+defaults remain. Only the selected interface's device field is accepted, not
+two conflicting device settings. The runner freezes configuration and launches one isolated
+worker per run, sequentially within a shard. `helpers/depth_config.py` validates
+the protocol and partitions jobs by summed depth. There are 13 depths
+`[1,2,3,5,8,12,16,24,32,48,64,96,128]`, three readouts, five fixed seeds, two
+datasets: 390 runs. Two shards per dataset can run concurrently on two 48 GB
+GPUs, two workers per GPU selected using `CUDA_VISIBLE_DEVICES`.
+
+`helpers/feature_cache.py` reads existing complete `polarization.1p1q-features`
+HDF5 caches; there is no runtime dependency on the polarization checkout. Base
+angles have shape `(events, wires, 2)` and contain `(pt_fraction*deta,
+pt_fraction*wrapped_dphi)`. Each seed selects 200000 training events, with full
+JetClass validation (1M) or 100000 JetGame validation events. Exact canonical
+Top/QCD subset RNG and row ordering match polarization. Bounded HDF5 reads avoid
+its entire-dataset materialization. Immutable per-seed memory-mapped subsets are
+built once under locks, with cache identity and selected feature/row/label/ID
+hashes. JetClass IDs are synthetic split/row identifiers, not content hashes.
+
+`quantum/circuits/reupload.py` reuses CircuitBase/VQCCircuit's ordered layer loop,
+CNOT ring and rotations; every layer encodes the SAME particles via RY then RX,
+scaled by `3.926990817 * (1 + 2*pi*sigmoid(deformation))`. No successive-particle
+offset is used. `qml.probs` on default.qubit/Torch-or-JAX/backprop/shots=None supplies
+one final computational-basis distribution. Classical parity signs compute
+`<Z0>`, `sum a_i<Zi>`, or `sum a_i<Zi> + sum_(i<j) b_ij<ZiZj>` and add bias.
+All 45 pairs are included for ten wires. Readout coefficients initialize to Z0;
+rotations/deformation use polarization's seeded Torch U(0,pi) stream, bias=0.
+There is no native quantum simulator. Internal precision may be promoted by
+PennyLane; actual probability dtype is recorded, not asserted to be float32.
+
+`helpers/depth_study.py` owns one shared lifecycle for both numerical backends.
+Torch uses its AdamW; `helpers/depth_jax.py` uses Optax AdamW with the same betas,
+epsilon, masked decay and dynamic epoch LR. JAX JIT compiles training and batched
+prediction once per worker/session; compilation is separately timed and reported.
+Fixed-size zero padding with explicit loss masks retains every partial batch
+without retracing. `lax.scan` sums weighted microbatch gradients before one
+optimizer update. A second `lax.scan` loops over the shared PennyLane layer to
+avoid an enormous depth-unrolled XLA graph. PennyLane prepares |0>, executes
+each layer, and computes final probabilities; `qml.StatePrep` passes the full
+analytic state between layers without normalization, reset, measurement or
+gradient stopping. There is no native simulator. Values/gradients are checked
+against the full, unrolled Torch QNode. JAX x64 is enabled for promoted state precision and
+matmul precision is highest; configured input/parameter/readout dtype is retained.
+Torch CPU supplies the same initialization and epoch-shuffle RNG streams on both
+paths. GPU selection is explicit and fails if unavailable; XLA preallocation is
+disabled by default before JAX import for GPU sharing. JAX memory statistics are
+allocator high-water marks where supported, otherwise null, not Torch readings.
+
+Both use AdamW with decay only on classical parameters,
+25 epochs, 5-epoch linear warmup (0.001→0.005), cosine decay to 0.001, BCE logits.
+The optimizer batch is 1024; configurable microbatches default to 64 for the
+two-48-GB-GPU deployment, with sample-weighted gradient accumulation. This
+microbatch has not been CUDA-profiled locally. A seed controls initialization,
+data subset selection and epoch shuffles; five-seed spread is not exclusively
+initialization uncertainty. No early stopping; best model selection uses
+validation AUC, with minimum validation BCE separately reported. Test data are
+not accessed by this scan.
+
+Runs live at `<output_dir>/<dataset>/L<depth>/<readout>/<seed>/`. Each saves source
+snapshots, config/data hashes, dependency/hardware/session metadata, initial
+metrics, per-epoch CSV/JSON history, AdamW epoch checkpoint, best/final weights,
+validation predictions/identities and completion-marked results.json. Resume
+rejects changed config, source, selected data or dependency versions. Initial
+and final fixed-weight train BCE are evaluated to measure comparable BCE drops;
+epoch online train BCE is separately labelled. CUDA times are synchronized and
+training, validation, metric calculation, data load and JIT compilation times are
+distinguished. JAX checkpoints retain NumPy-converted parameter/Optax trees in
+the same `.pt` container format, with shape/dtype validation on restore. Torch
+and JAX artifacts are not interchangeable; neither are pre-port source snapshots
+accepted for continuation under changed code. Keep old result trees intact.
+
+`helpers/depth_metrics.py` records BCE, ROC AUC/AP, accuracy/balanced accuracy,
+Brier score, confusion counts, operating-point thresholds/efficiencies/rejection,
+score distributions, timing/throughput/memory and nominal parameter counts.
+Zero accepted background gives null rejection. Nominal parameter counts include
+the known Z0 final-layer non-readout rotations (27 at ten wires) with zero
+influence. The reporting layer provides per-run CSV, mean/sample-SD/SEM/Student-t
+interval tables, paired within-seed differences versus Z0, explicit missing-seed
+coverage, and PNG/PDF depth plots. Each completed launcher refreshes the combined
+report under a lock. Validation selection and five seeds do not establish
+unbiased held-out test performance or convergence.
+
+The remainder of this document describes the original `train.py` workflow
+unless specifically qualified.
 
 The repository uses namespace packages and has no tracked `__init__.py` files under `helpers/` or `quantum/`. Run commands from the repository root so those imports resolve naturally.
 
@@ -351,7 +455,13 @@ MPLCONFIGDIR=/tmp/matplotlib conda run -n pennylane-gpu-jax-sep2026 \
   python -m unittest discover -s tests -q
 ```
 
-The suite contained 89 tests at the last verification on 2026-09-11, all passing under `pennylane-gpu-jax-sep2026` (jax installed, so no jax-backend tests are skipped; they are guarded with `skipUnless(_HAS_JAX, ...)` for environments without jax). JetClass integration tests are separately guarded with `skipUnless` and run only when `/ceph/abal/JetClass/test/TTBar_` and `/ceph/abal/JetClass/test/ZJetsToNuNu` exist (true in this environment, so they run as part of the full suite).
+Upstream reported 89 passing tests under `pennylane-gpu-jax-sep2026` on
+2026-09-11; that is not a local verification of this merged checkout. This
+checkout additionally has Torch/JAX depth-study tests. JAX tests are guarded
+when dependencies are missing. Original JetClass integration tests run only
+when `/ceph/abal/JetClass/test/TTBar_` and `/ceph/abal/JetClass/test/ZJetsToNuNu`
+exist. Current local verification and remaining environment/GPU limits are
+recorded in `problems.MD` and `configs/DEPTH_READOUT.md`.
 
 | Test file | Coverage |
 | --- | --- |
@@ -365,6 +475,8 @@ The suite contained 89 tests at the last verification on 2026-09-11, all passing
 | `test_publish_reports.py` | Report JSON structure, path redaction, and aggregate/per-run plot data (including score-distribution histograms). |
 | `test_run_experiments.py` | Launcher configuration ownership, random seed generation, concurrency limits, failure handling, interruption, and child thread limits. |
 | `test_saved_run.py` | Saved circuit imports, legacy compatibility, nested paths, config and hash mismatch rejection, final weight validation, checkpoint provenance, CLI restrictions, and mocked training-to-evaluation flow. |
+| `test_depth_readout.py` | Explicit Hamiltonian parity, matched cached subsets, Torch training, partial microbatches, resume and reports. |
+| `test_depth_jax.py` | Four-shard CLI/overlay, JAX/Torch logits/BCE/gradient and AdamW parity, L=128, device/nonfinite failure, JAX continuation and real subprocess launch/report. |
 
 Warnings about CUDA initialization or Autograd with NumPy 2 may appear in the local environment without failing tests. Investigate new warnings separately from these known dependency warnings.
 

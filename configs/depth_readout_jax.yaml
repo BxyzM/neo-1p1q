@@ -1,0 +1,7 @@
+# Overlay selected by run_depth_readout.py --jax; scientific defaults stay in
+# depth_readout.yaml. JAX runs must not reuse Torch checkpoints/results.
+output_dir: ./saved_models/depth_readout_jax
+circuit:
+  interface: jax
+training:
+  jax_device: gpu:0  # logical device after CUDA_VISIBLE_DEVICES remapping

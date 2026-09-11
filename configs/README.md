@@ -2,6 +2,12 @@
 
 `base.yaml` is the default configuration for the JetClass variational quantum classifier. Both `train.py` and `evaluate.py` use the same schema. Training saves the resolved configuration with the model so that evaluation can rebuild the same circuit and data selection.
 
+`depth_readout.yaml` belongs to the separate `run_depth_readout.py` study entry
+point. `--jax` selects the `depth_readout_jax.yaml` execution/output overlay.
+Its cached-angle inputs, same-particle reuploading, Torch or JAX/Optax AdamW
+schedule, four-way launch instructions and reporting contract are documented in
+[DEPTH_READOUT.md](DEPTH_READOUT.md). Do not pass it to `train.py` or `evaluate.py`.
+
 ## Loading and overriding values
 
 The project uses OmegaConf to read YAML and apply command line overrides. YAML provides the defaults, while arguments in `key=value` form replace individual entries:
