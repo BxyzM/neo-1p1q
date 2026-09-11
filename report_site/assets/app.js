@@ -9,11 +9,14 @@
  *   has id, status, run_count, successful_runs, mean_auc, std_auc, total_jets,
  *   loss, device, and mode.
  *   data/<id>.json provides `summary`, `validation`, `roc`, `epoch_times`,
- *   `compile_times`, `score_distribution`, `runs`, `config`, and `notices`. Missing values are
- *   displayed rather than inferred. `score_distribution.runs` is shown per seed only -- it has no
- *   aggregate view. `compile_times` (jax-only) is `{train?: {mean, std, n}, val?: {mean, std, n}}`,
- *   each key absent when no run in the experiment has that measurement; shown as plain stat cards,
- *   not a chart.
+ *   `compile_times`, `circuit_diagram`, `score_distribution`, `runs`, `config`, and `notices`.
+ *   Missing values are displayed rather than inferred. `score_distribution.runs` is shown per seed
+ *   only -- it has no aggregate view. `compile_times` (jax-only) is
+ *   `{train?: {mean, std, n}, val?: {mean, std, n}}`, each key absent when no run in the experiment
+ *   has that measurement; shown as plain stat cards, not a chart. `circuit_diagram` is a root-relative
+ *   PNG path (one per experiment, structure only, not trained values) or null. Each entry in `runs`
+ *   carries `aux_weights: {scale_factor, bias, hamiltonian_coeffs}` (or `{}`); hamiltonian_coeffs
+ *   feeds the per-seed Hamiltonian formula and is not displayed as raw numbers itself.
  */
 
 "use strict";
@@ -158,6 +161,22 @@ function renderReport(data) {
 
     ${renderNotices(data.notices)}
 
+    <section class="report-section" aria-labelledby="circuit-title">
+      <div class="section-heading">
+        <div><p class="eyebrow">Architecture</p><h2 id="circuit-title">Circuit</h2></div>
+        <p>The variational circuit structure shared by every run in this experiment.</p>
+      </div>
+      ${renderCircuitDiagram(data.circuit_diagram)}
+    </section>
+
+    <section class="report-section" aria-labelledby="model-summary-title">
+      <div class="section-heading">
+        <div><p class="eyebrow">Architecture</p><h2 id="model-summary-title">Trained model</h2></div>
+        <p>Final auxiliary weights and measurement Hamiltonian, per random seed.</p>
+      </div>
+      ${renderModelSummaryCard(data.runs)}
+    </section>
+
     <section class="report-section" aria-labelledby="validation-title">
       <div class="section-heading">
         <div><p class="eyebrow">Training</p><h2 id="validation-title">Validation AUC</h2></div>
@@ -207,10 +226,16 @@ function renderReport(data) {
 
   renderValidationPlot(data.validation ?? {}, "aggregate");
   renderEpochTimePlot(data.epoch_times ?? {}, "aggregate");
-  renderRocPlot(data.roc ?? {}, "aggregate");
+  renderRocPlot(data.roc ?? {}, "aggregate", summary);
   setupChartToggle("validation", (mode) => renderValidationPlot(data.validation ?? {}, mode));
   setupChartToggle("epoch_times", (mode) => renderEpochTimePlot(data.epoch_times ?? {}, mode));
-  setupChartToggle("roc", (mode) => renderRocPlot(data.roc ?? {}, mode));
+  setupChartToggle("roc", (mode) => renderRocPlot(data.roc ?? {}, mode, summary));
+
+  const modelSummaryRuns = sortedRuns(data.runs).filter((run) => run.aux_weights && Object.keys(run.aux_weights).length);
+  if (modelSummaryRuns.length) {
+    renderModelSummary(modelSummaryRuns, modelSummaryRuns[0].random_seed);
+    setupSeedToggle("model-seed-selector", (seed) => renderModelSummary(modelSummaryRuns, seed));
+  }
 
   const distributionRuns = sortedRuns(data.score_distribution?.runs);
   const scoreAxisTitle = data.config?.optimization?.loss === "BCE" ? "Predicted probability" : "Classifier score";
@@ -346,7 +371,7 @@ function renderEpochTimePlot(epochTimes, mode) {
   }, "No epoch timing data is available for this experiment.");
 }
 
-function renderRocPlot(roc, mode) {
+function renderRocPlot(roc, mode, summary) {
   const target = document.querySelector("#roc-chart");
   if (!window.Plotly) {
     renderChartError(target, "Plotly could not be loaded.");
@@ -393,11 +418,68 @@ function renderRocPlot(roc, mode) {
       line: { color: "#7c848c", width: 1.4, dash: "dot" }, hoverinfo: "skip",
     });
   }
+  const meanAuc = numeric(summary?.mean_auc);
+  const stdAuc = numeric(summary?.std_auc);
+  const annotations = traces.length && meanAuc !== null ? [{
+    text: `Mean AUC = ${meanAuc.toFixed(4)}${stdAuc === null ? "" : ` ± ${stdAuc.toFixed(4)}`}`,
+    xref: "paper", yref: "paper",
+    x: 0.97, y: 0.03, xanchor: "right", yanchor: "bottom",
+    showarrow: false,
+    font: { color: "#aab3ac", size: 12 },
+    bgcolor: "rgba(26,29,36,0.8)",
+    bordercolor: "rgba(127,219,149,0.25)",
+    borderwidth: 1,
+    borderpad: 6,
+  }] : [];
   drawPlot(target, traces, {
     xaxis: { title: "False positive rate", range: [0, 1], constrain: "domain" },
     yaxis: { title: "True positive rate", range: [0, 1], scaleanchor: "x", scaleratio: 1 },
     showlegend: true,
+    annotations,
   }, "No ROC data is available for this experiment.");
+}
+
+function renderCircuitDiagram(path) {
+  if (!path) {
+    return '<div class="empty-state"><p>No circuit diagram is available for this experiment.</p></div>';
+  }
+  return `
+    <div class="chart-card circuit-card">
+      <img src="${safeText(path)}" alt="Variational circuit diagram" loading="lazy">
+    </div>`;
+}
+
+function renderModelSummaryCard(runsValue) {
+  const runs = sortedRuns(runsValue).filter((run) => run.aux_weights && Object.keys(run.aux_weights).length);
+  if (!runs.length) {
+    return '<div class="empty-state"><p>No trained model weights are available for this experiment.</p></div>';
+  }
+  return `
+    <div class="chart-card">
+      <div class="chart-toolbar">
+        <strong>Final auxiliary weights &amp; Hamiltonian</strong>
+        <div class="segmented" id="model-seed-selector" role="group" aria-label="Trained model seed">
+          ${runs.map((run, index) => `
+            <button type="button" data-seed="${safeText(run.random_seed)}" aria-pressed="${index === 0}">Seed ${safeText(run.random_seed)}</button>
+          `).join("")}
+        </div>
+      </div>
+      <div class="model-summary" id="model-summary-body"></div>
+    </div>`;
+}
+
+function renderModelSummary(runs, seed) {
+  const target = document.querySelector("#model-summary-body");
+  if (!target) return;
+  const run = runs.find((candidate) => String(candidate.random_seed) === String(seed));
+  const aux = run?.aux_weights ?? {};
+  const formula = formatHamiltonian(aux.hamiltonian_coeffs);
+  target.innerHTML = `
+    <div class="stat-grid model-summary__stats">
+      ${statCard("Scale factor", formatDecimal2(aux.scale_factor))}
+      ${statCard("Bias", formatDecimal2(aux.bias))}
+    </div>
+    <p class="hamiltonian-formula">${formula ? safeText(formula) : "Unavailable"}</p>`;
 }
 
 function renderScoreDistributionCard(scoreDistribution) {
@@ -605,6 +687,27 @@ function numeric(value) {
 function formatDecimal(value) {
   const converted = numeric(value);
   return converted === null ? "Unavailable" : converted.toFixed(4);
+}
+
+function formatDecimal2(value) {
+  const converted = numeric(value);
+  return converted === null ? "Unavailable" : converted.toFixed(2);
+}
+
+function formatHamiltonian(coeffs) {
+  if (!Array.isArray(coeffs) || !coeffs.length) return null;
+  const subscriptDigits = "₀₁₂₃₄₅₆₇₈₉";
+  const subscript = (n) => String(n).split("").map((digit) => subscriptDigits[Number(digit)]).join("");
+  const terms = coeffs.map((raw, index) => {
+    const rounded = Math.round((numeric(raw) ?? 0) * 100) / 100;
+    return { magnitude: Math.abs(rounded).toFixed(2), negative: rounded < 0, index };
+  });
+  const body = terms.map((term, position) => {
+    const symbol = `${term.magnitude} Ẑ${subscript(term.index)}`;
+    if (position === 0) return term.negative ? `− ${symbol}` : symbol;
+    return term.negative ? ` − ${symbol}` : ` + ${symbol}`;
+  }).join("");
+  return `Ĥ = ${body}`;
 }
 
 function aucWithError(mean, deviation) {

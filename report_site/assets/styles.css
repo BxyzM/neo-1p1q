@@ -383,6 +383,39 @@ h3 { font-size: 1.4rem; }
   min-height: 470px;
 }
 
+.circuit-card {
+  padding: 1.5rem;
+  overflow-x: auto;
+  text-align: center;
+}
+
+.circuit-card img {
+  max-width: 100%;
+  height: auto;
+  border-radius: 8px;
+}
+
+.model-summary { padding: 1.25rem 1.15rem 1.5rem; }
+.model-summary__stats {
+  margin-top: 0;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+}
+
+.hamiltonian-formula {
+  margin: 1.5rem 0 0;
+  padding: 1.1rem 1.3rem;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--cream-dark);
+  color: var(--ink);
+  font-family: var(--serif);
+  font-size: clamp(1.05rem, 2.4vw, 1.35rem);
+  font-style: italic;
+  letter-spacing: 0.02em;
+  text-align: center;
+  overflow-wrap: anywhere;
+}
+
 .table-card { overflow: hidden; }
 .table-scroll { overflow-x: auto; }
 
