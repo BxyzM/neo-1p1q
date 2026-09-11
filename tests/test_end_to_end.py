@@ -518,8 +518,8 @@ class TestEvaluateEquivalentInference(unittest.TestCase):
             self.assertEqual(len(scores), 4)
             self.assertEqual(len(labels), 4)
 
-    def test_run_inference_processes_multi_jet_chunks_one_at_a_time(self) -> None:
-        """A loader that groups jets is still scored jet by jet: N jets in -> N results out."""
+    def test_run_inference_processes_multi_jet_chunks_as_batches(self) -> None:
+        """A loader that groups jets is scored one call per chunk: N jets in -> N results out."""
         with tempfile.TemporaryDirectory() as save_dir:
             vqc2 = self._trained_classifier(save_dir)
 
@@ -528,6 +528,47 @@ class TestEvaluateEquivalentInference(unittest.TestCase):
             self.assertEqual(len(costs), 12)
             self.assertEqual(len(scores), 12)
             self.assertEqual(len(labels), 12)
+
+    def test_run_inference_jax_backend_batches_and_matches_autograd(self) -> None:
+        """backend='jax' must batch (not loop per jet) via a jitted step, and
+        its scores must match autograd's -- with each batch's cost broadcast
+        identically to every jet in that batch."""
+        wires, n_layers = 2, 1
+        onp.random.seed(0)
+        data = np.array(onp.random.uniform(-1, 1, size=(5, wires * n_layers, 3)))
+        labels = onp.array([0, 1, 0, 1, 0])
+        rot = np.array(onp.random.uniform(0, np.pi, size=(n_layers, wires, 3)), requires_grad=False)
+
+        autograd_vqc = arch.QuantumClassifier(
+            wires=wires, shots=None, dev_name='default.qubit', layers=n_layers,
+            backend_name='autograd', test=False,
+        )
+        autograd_vqc.set_circuit('normal', operations_per_qubit=3)
+        aux = {k: np.array(v, requires_grad=False) for k, v in resolve_aux_weights(autograd_vqc).items()}
+        weights = CircuitWeights(rot=rot, aux=aux)
+        autograd_vqc.current_weights = weights
+        loader = _FixedBatches([data[:3], data[3:]], [labels[:3], labels[3:]])
+        _, autograd_scores, autograd_labels = autograd_vqc.run_inference(
+            loader, loss_fn=loss.VQC_cost, loss_type='MSE'
+        )
+
+        jax_vqc = arch.QuantumClassifier(
+            wires=wires, shots=None, dev_name='default.qubit', layers=n_layers,
+            backend_name='jax', test=False,
+        )
+        jax_vqc.set_circuit('normal', operations_per_qubit=3)
+        jax_vqc.current_weights = weights
+        loader = _FixedBatches([data[:3], data[3:]], [labels[:3], labels[3:]])
+        costs, jax_scores, jax_labels = jax_vqc.run_inference(
+            loader, loss_fn=loss.VQC_cost, loss_type='MSE'
+        )
+
+        onp.testing.assert_allclose(onp.array(jax_scores), onp.array(autograd_scores), atol=1e-6)
+        onp.testing.assert_array_equal(onp.array(jax_labels), onp.array(autograd_labels))
+        self.assertEqual(costs[0], costs[1])
+        self.assertEqual(costs[1], costs[2])
+        self.assertEqual(costs[3], costs[4])
+        self.assertNotEqual(costs[0], costs[3])
 
 
 class TestKnownPreExistingBugs(unittest.TestCase):
