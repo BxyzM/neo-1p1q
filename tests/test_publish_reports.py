@@ -7,6 +7,7 @@ Date: 2026-09-10
 
 import csv
 import json
+import shutil
 import stat
 from pathlib import Path
 import pickle
@@ -17,6 +18,8 @@ import numpy as np
 from omegaconf import OmegaConf
 
 import publish_reports
+from helpers.trained_run import save_circuit_snapshot
+from quantum.circuits.base import CircuitWeights
 
 
 class TestReportPublication(unittest.TestCase):
@@ -51,6 +54,7 @@ class TestReportPublication(unittest.TestCase):
         result_dir = self.results / experiment / str(random_seed)
         run_dir.mkdir(parents=True)
         result_dir.mkdir(parents=True)
+        save_circuit_snapshot(str(run_dir))
         cfg = {
             "seed": experiment,
             "random_seed": random_seed,
@@ -93,6 +97,10 @@ class TestReportPublication(unittest.TestCase):
             }, stream)
         with (run_dir / "trained_model.pickle").open("wb") as stream:
             pickle.dump({
+                "weights": CircuitWeights(
+                    rot=np.zeros((1, 4, 3)),
+                    aux={"scale_factor": 1.0, "bias": 0.1, "hamiltonian_coeffs": [0.1] * 4},
+                ),
                 "training": {
                     "completed_epochs": len(validation_aucs) - 1,
                     "stop_reason": "early_stopping",
@@ -282,6 +290,36 @@ class TestReportPublication(unittest.TestCase):
         self.assertTrue(any("nonnumeric saved-run" in message for message in messages))
         self.assertEqual(index["experiments"][0]["status"], "partial")
         self.assertTrue(index["experiments"][0]["notices"])
+
+    def test_circuit_diagram_is_generated_and_aux_weights_are_published(self) -> None:
+        self._write_run("007", 80, [0.5, 0.6], [0.1, 0.9], [0, 1])
+        self._write_run("007", 81, [0.5, 0.6], [0.1, 0.9], [0, 1])
+
+        publish_reports.publish_reports(self.models, self.results, self.output, self.site)
+        detail = json.loads((self.output / "data" / "007.json").read_text())
+
+        self.assertEqual(detail["circuit_diagram"], "data/circuits/007.png")
+        diagram_path = self.output / "data" / "circuits" / "007.png"
+        self.assertTrue(diagram_path.is_file())
+        self.assertGreater(diagram_path.stat().st_size, 0)
+
+        run = detail["runs"][0]
+        self.assertEqual(run["aux_weights"]["scale_factor"], 1.0)
+        self.assertEqual(run["aux_weights"]["bias"], 0.1)
+        self.assertEqual(run["aux_weights"]["hamiltonian_coeffs"], [0.1, 0.1, 0.1, 0.1])
+        messages = [notice["message"] for notice in detail["notices"]]
+        self.assertFalse(any("circuit diagram" in message.lower() for message in messages))
+
+    def test_missing_circuit_snapshot_reports_a_notice(self) -> None:
+        self._write_run("008", 90, [0.5, 0.6], [0.1, 0.9], [0, 1])
+        shutil.rmtree(self.models / "008" / "90" / "circuits")
+
+        publish_reports.publish_reports(self.models, self.results, self.output, self.site)
+        detail = json.loads((self.output / "data" / "008.json").read_text())
+
+        self.assertIsNone(detail["circuit_diagram"])
+        messages = [notice["message"] for notice in detail["notices"]]
+        self.assertTrue(any("circuit diagram" in message.lower() for message in messages))
 
 
 if __name__ == "__main__":
