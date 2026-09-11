@@ -144,7 +144,7 @@ Values are scaled but not clipped. With `norm_pt=true`, constituent pt is divide
 
 The circuit needs `wires * num_layers` particles because every layer encodes a new group of particles. `num_particles` is an optional OmegaConf override. It defaults to that product and cannot be smaller.
 
-Training and validation use the configured `batch_size`. Evaluation omits that argument and therefore uses the loader default of 32, but `run_inference()` deliberately scores each jet individually.
+Training, validation, and evaluation all use the configured `batch_size` -- `evaluate.py` passes it explicitly to the test loader. `run_inference()` scores each batch as one call (jitted for `backend='jax'`, mirroring `QuantumTrainer`'s train/val steps), not jet by jet; `costs` in its return value holds each batch's mean loss broadcast to every jet in that batch, since nothing downstream reads per-jet cost (only `scores`/`labels`, for AUC/ROC).
 
 ## Configuration behavior
 

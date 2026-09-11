@@ -76,7 +76,7 @@ python run_experiments.py \
 | `n_signal`, `n_background` | Number of signal and background jets requested for training. |
 | `n_signal_val`, `n_background_val` | Number of jets requested for validation. |
 | `n_signal_test`, `n_background_test` | Number of jets requested for evaluation. |
-| `batch_size` | Number of jets in each training and validation batch. The last smaller batch is retained. |
+| `batch_size` | Number of jets in each training, validation, and evaluation batch. The last smaller batch is retained. |
 | `flat` | Uses `flat_train`, `flat_val`, and `flat_test` when `true`; otherwise uses `train`, `val`, and `test`. |
 | `norm_pt` | Divides constituent transverse momentum by the jet transverse momentum when `true`. When `false`, the loader applies its fixed scaling limits. |
 
