@@ -28,6 +28,76 @@ from helpers.utils import getIndex
 from quantum.circuits import registry
 from quantum.circuits.base import Circuit, CircuitWeights
 
+_jax_x64_enabled = False
+
+
+def _enable_jax_x64_once() -> None:
+    """Enable float64 in JAX, once, before any JAX array is created.
+
+    Must run before the jax backend touches a single array: JAX defaults to
+    float32, and enabling x64 later leaves already-created arrays at float32,
+    silently diverging from the autograd path's float64 baseline. Importing
+    jax stays conditional on this backend being selected.
+    """
+    global _jax_x64_enabled
+    if _jax_x64_enabled:
+        return
+    import jax
+    jax.config.update("jax_enable_x64", True)
+    _jax_x64_enabled = True
+
+
+def to_jax_pytree(weights: CircuitWeights) -> Dict[str, Any]:
+    """Convert CircuitWeights into a flat dict pytree of JAX arrays.
+
+    The narrow seam between the backend-agnostic CircuitWeights used for
+    initialization/checkpointing and the jax training step, which needs a
+    plain pytree to differentiate and jit through.
+    """
+    import jax.numpy as jnp
+    pytree = {'rot': jnp.array(weights.rot)}
+    pytree.update({name: jnp.array(value) for name, value in weights.aux.items()})
+    return pytree
+
+
+def from_jax_pytree(pytree: Dict[str, Any]) -> CircuitWeights:
+    """Convert a flat dict pytree of (JAX or plain) arrays back into CircuitWeights."""
+    rot = np.array(pytree['rot'], requires_grad=True)
+    aux = {name: np.array(value, requires_grad=True) for name, value in pytree.items() if name != 'rot'}
+    return CircuitWeights(rot=rot, aux=aux)
+
+
+def _make_jax_train_step(
+    circuit: qml.QNode, optimizer: Any, loss_type: str, quantum_loss: Callable
+) -> Callable:
+    """Build one jax.jit-compiled Adam step, closing over the fixed (non-traced)
+    circuit/optimizer/loss_type. jax.jit retraces on argument shape change --
+    data/labels have at most two distinct shapes per run (a regular batch and a
+    smaller final partial batch), so this compiles at most twice per run, not
+    once per epoch.
+    """
+    import jax
+    import optax
+
+    def cost_fn(params: Dict[str, Any], data: Any, labels: Any) -> Any:
+        weights = CircuitWeights(
+            rot=params['rot'],
+            aux={key: value for key, value in params.items() if key != 'rot'},
+        )
+        return quantum_loss(
+            weights, inputs=data, labels=labels,
+            quantum_circuit=circuit, loss_type=loss_type,
+        )
+
+    @jax.jit
+    def train_step(params, opt_state, data, labels):
+        cost, grads = jax.value_and_grad(cost_fn)(params, data, labels)
+        updates, new_opt_state = optimizer.update(grads, opt_state, params)
+        new_params = optax.apply_updates(params, updates)
+        return new_params, new_opt_state, cost
+
+    return train_step
+
 
 class QuantumClassifier:
     """
@@ -59,6 +129,8 @@ class QuantumClassifier:
         random_seed: Optional[int] = None,
         **kwargs: Any
     ) -> None:
+        if backend_name == 'jax':
+            _enable_jax_x64_once()
         # Circuit configuration
         self.n_qubits = wires
         self.num_layers = layers
@@ -126,6 +198,9 @@ class QuantumClassifier:
             cfg.circuit_type,
             operations_per_qubit=cfg.operations_per_qubit,
             circuit_registry=circuit_registry,
+            # 'best' (PennyLane's own QNode default) reproduces the historical
+            # behaviour for configs saved before diff_method was configurable.
+            diff_method=cfg.get('diff_method', 'best'),
         )
         return model
     
@@ -179,6 +254,7 @@ class QuantumClassifier:
         circuit_type: str = 'normal',
         operations_per_qubit: Optional[int] = None,
         circuit_registry: Any = registry,
+        diff_method: str = 'backprop',
     ) -> None:
         """
         Configure the QNode circuit from the circuit registry.
@@ -188,16 +264,37 @@ class QuantumClassifier:
             operations_per_qubit: overrides the circuit's default rotation ops
                 per qubit per layer (R in its RotationShape), if given.
             circuit_registry: registry module used to resolve circuit_type.
+            diff_method: PennyLane QNode differentiation method (e.g. 'backprop',
+                'parameter-shift', 'adjoint'). Not every method works with every
+                device or shot count -- see the raised error for guidance.
         """
         self._impl = circuit_registry.get(circuit_type, self.num_layers)
         if operations_per_qubit is not None:
             self._impl.operations_per_qubit = operations_per_qubit
-        qnode = qml.QNode(
-            lambda weights, inputs: self._impl.build(weights, inputs, self.auto_wires),
-            self.device,
-            interface=self.backend,
-            diff_method='parameter-shift',
-        )
+        if self.backend == 'jax' and self.device.shots:
+            raise ValueError(
+                f"backend='jax' only supports analytic execution (shots<=0), but this "
+                f"device has shots={self.device.shots.total_shots}. Finite-shot sampling "
+                "under the jax backend is not implemented; use backend='autograd' for "
+                "finite-shot runs, or set shots<=0 for an analytic jax run."
+            )
+        try:
+            qnode = qml.QNode(
+                lambda weights, inputs: self._impl.build(weights, inputs, self.auto_wires),
+                self.device,
+                interface=self.backend,
+                diff_method=diff_method,
+            )
+        except qml.exceptions.QuantumFunctionError as error:
+            raise ValueError(
+                f"diff_method='{diff_method}' is not compatible with device {self.device}: {error}\n"
+                "Suggestion: 'parameter-shift' works on any device and any shot count, "
+                "including finite shots and Hamiltonian-coefficient training (slower per "
+                "step). 'backprop' is fast but only works with an analytic (shots=None), "
+                "backprop-capable simulator such as default.qubit. 'adjoint' is fast on "
+                "statevector simulators like lightning.qubit but cannot differentiate "
+                "Hamiltonian/observable coefficients such as aux_weights.hamiltonian_coeffs."
+            ) from error
         # Expand before differentiation so finite-shot parameter-shift supports
         # broadcast inputs whose encoded angles also contain trainable values.
         self.circuit = qml.transforms.broadcast_expand(qnode)
@@ -387,6 +484,24 @@ class QuantumTrainer:
         self.quantum_loss = loss_fn
         self.history: Dict[str, List[float]] = {'train': [], 'val': [], 'auc': []}
         self.n_decays = 0
+
+        # jax backend: current_weights stays the single source of truth (read by
+        # validation, checkpointing, and final certification, all backend-agnostic);
+        # jax_params/jax_opt_state are the differentiable/optax-native mirror used
+        # only inside iteration()'s training step. restore_checkpoint() re-derives
+        # both from a restored current_weights on resume. _jax_train_step is jitted
+        # once here (not per-call) so jax.jit's compilation cache actually applies --
+        # a freshly redefined closure every call would defeat it, since jit's cache
+        # key includes function identity, not just argument shapes.
+        self.jax_params: Optional[Dict[str, Any]] = None
+        self.jax_opt_state: Optional[Any] = None
+        self._jax_train_step: Optional[Callable] = None
+        if self.backend == 'jax' and self.current_weights is not None:
+            self.jax_params = to_jax_pytree(self.current_weights)
+            self.jax_opt_state = self.optim.init(self.jax_params)
+            self._jax_train_step = _make_jax_train_step(
+                self.circuit, self.optim, self.loss_type, self.quantum_loss
+            )
         
         # Directories (to be set later)
         self.save_dir: Optional[str] = None
@@ -413,6 +528,15 @@ class QuantumTrainer:
         Returns:
             Training loss (if train=True) or tuple of (validation loss, scores)
         """
+        if train and self.backend == 'jax':
+            self.jax_params, self.jax_opt_state, cost = self._jax_train_step(
+                self.jax_params, self.jax_opt_state, data, labels
+            )
+            # self.current_weights must stay in sync on every call: validation,
+            # save_checkpoint(), and train.py's final save_trained_run() all read
+            # it directly and have no reason to know a jax branch exists.
+            self.current_weights = from_jax_pytree(self.jax_params)
+            return float(cost)
         if train:
             # step_and_cost needs each trainable piece as its own argument (a
             # CircuitWeights isn't itself differentiable) -- see D7. cost_fn
@@ -496,10 +620,22 @@ class QuantumTrainer:
                 if improvement < self.improv:
                     if self.n_decays < self.decay_patience:
                         self.n_decays += 1
-                        self.optim.stepsize *= self.decay_rate
+                        if self.backend == 'jax':
+                            # optax.inject_hyperparams keeps the learning rate as a
+                            # mutable opt_state field, so decay is a plain field
+                            # replace -- no optimizer reconstruction, no recompile.
+                            hyperparams = self.jax_opt_state.hyperparams
+                            new_lr = hyperparams['learning_rate'] * self.decay_rate
+                            self.jax_opt_state = self.jax_opt_state._replace(
+                                hyperparams={**hyperparams, 'learning_rate': new_lr}
+                            )
+                            current_stepsize = float(new_lr)
+                        else:
+                            self.optim.stepsize *= self.decay_rate
+                            current_stepsize = self.optim.stepsize
                         self.logger.info(
                             f'No improvement observed over last 3 epochs. \n'
-                            f'Learning rate decayed to {self.optim.stepsize} at epoch {n_epoch}'
+                            f'Learning rate decayed to {current_stepsize} at epoch {n_epoch}'
                         )
                     else:
                         self.logger.info(
@@ -650,6 +786,26 @@ class QuantumTrainer:
             print(prefix)
         print('autograd weights:', self.current_weights, '\n')
     
+    def _optimizer_checkpoint_payload(self) -> Dict[str, Any]:
+        """Build the backend-appropriate 'optimizer' checkpoint block."""
+        if self.backend == 'jax':
+            import jax
+            import numpy as onp
+            return {
+                'name': 'optax_adam',
+                # Leaves converted to plain NumPy: JAX array pickling is
+                # device/backend-dependent and not the documented portable path.
+                'opt_state': jax.tree_util.tree_map(onp.asarray, self.jax_opt_state),
+            }
+        return {
+            'name': type(self.optim).__name__,
+            'stepsize': self.optim.stepsize,
+            'beta1': self.optim.beta1,
+            'beta2': self.optim.beta2,
+            'eps': self.optim.eps,
+            'accumulation': self.optim.accumulation,
+        }
+
     def save_checkpoint(self) -> pathlib.Path:
         """Atomically save all state needed to resume after the current epoch."""
         if self.checkpoint_dir is None:
@@ -658,14 +814,7 @@ class QuantumTrainer:
             raise RuntimeError('Checkpoint provenance has not been configured.')
         payload = {
             'weights': self.current_weights,
-            'optimizer': {
-                'name': type(self.optim).__name__,
-                'stepsize': self.optim.stepsize,
-                'beta1': self.optim.beta1,
-                'beta2': self.optim.beta2,
-                'eps': self.optim.eps,
-                'accumulation': self.optim.accumulation,
-            },
+            'optimizer': self._optimizer_checkpoint_payload(),
             'training': {
                 'config': self.checkpoint_config,
                 'implementation': self.circuit_signature,
@@ -680,17 +829,27 @@ class QuantumTrainer:
             pickle.dump(payload, stream)
         temporary.replace(path)
         return path
-    
+
     def restore_checkpoint(self, payload: Dict[str, Any]) -> None:
-        """Restore weights, Adam accumulation, history, and the next epoch."""
+        """Restore weights, optimizer state, history, and the next epoch."""
         optimizer = payload['optimizer']
         training = payload['training']
         self.current_weights = payload['weights']
-        self.optim.stepsize = optimizer['stepsize']
-        self.optim.beta1 = optimizer['beta1']
-        self.optim.beta2 = optimizer['beta2']
-        self.optim.eps = optimizer['eps']
-        self.optim.accumulation = optimizer['accumulation']
+        if self.backend == 'jax':
+            import jax
+            import jax.numpy as jnp
+            self.jax_opt_state = jax.tree_util.tree_map(jnp.asarray, optimizer['opt_state'])
+            # jax_params must be re-derived from the just-restored current_weights,
+            # not left at whatever __init__ initialized it to -- otherwise a
+            # resumed run would restore the optimizer's momentum/step-count
+            # correctly but keep training from the wrong (stale/initial) weights.
+            self.jax_params = to_jax_pytree(self.current_weights)
+        else:
+            self.optim.stepsize = optimizer['stepsize']
+            self.optim.beta1 = optimizer['beta1']
+            self.optim.beta2 = optimizer['beta2']
+            self.optim.eps = optimizer['eps']
+            self.optim.accumulation = optimizer['accumulation']
         self.history = training['history']
         self.n_decays = training.get('n_decays', 0)
         self.current_epoch = training['completed_epoch'] + 1

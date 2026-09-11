@@ -20,8 +20,9 @@ dump: '/ceph/abal/Neo1P1Q/results'
 wires: 10
 num_layers: 1
 shots: -1
-backend: 'autograd'
-device_name: 'lightning.qubit'
+backend: 'jax'
+device_name: 'default.qubit'
+diff_method: 'backprop'
 circuit_type: 'normal'
 operations_per_qubit: 3
 aux_weights:

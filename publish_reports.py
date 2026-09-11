@@ -175,6 +175,7 @@ def _config_groups(cfg: dict[str, Any]) -> dict[str, dict[str, Any]]:
         },
         "execution": {
             "device": cfg.get("device_name"),
+            "diff_method": cfg.get("diff_method"),
             "backend": cfg.get("backend"),
             "mode": "analytic" if analytic else "finite shots",
             "shots": None if analytic else cfg.get("shots"),

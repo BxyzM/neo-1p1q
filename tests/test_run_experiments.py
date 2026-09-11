@@ -5,6 +5,9 @@ Author: Aritra Bal (ETP)
 Date: 2026-09-09
 """
 
+import argparse
+import contextlib
+import io
 import os
 from pathlib import Path
 import signal
@@ -15,7 +18,7 @@ from unittest.mock import patch
 from omegaconf import OmegaConf
 
 import run_experiments
-from helpers.config import DEFAULT_CONFIG
+from helpers.config import DEFAULT_CONFIG, gpu_id_list
 
 
 class _FakeProcess:
@@ -69,22 +72,24 @@ class TestRunExperiments(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             config_path = self._config(directory)
 
-            def inspect_launch(path, seeds, cores):
+            def inspect_launch(path, seeds, processes, backend, gpu_ids):
                 frozen = OmegaConf.load(path)
                 self.assertEqual(frozen.seed, 'changed')
                 self.assertNotIn('number_of_runs', frozen)
-                self.assertNotIn('num_cores', frozen)
+                self.assertNotIn('num_processes', frozen)
                 self.assertEqual(len(seeds), 3)
                 self.assertEqual(len(set(seeds)), 3)
                 self.assertTrue(all(isinstance(seed, int) and seed >= 0 for seed in seeds))
-                self.assertEqual(cores, 2)
+                self.assertEqual(processes, 2)
+                self.assertEqual(backend, 'jax')
+                self.assertEqual(gpu_ids, [0])
                 return 0
 
             with patch.object(run_experiments, 'launch_runs', side_effect=inspect_launch):
                 result = run_experiments.main([
                     '--config', config_path,
                     '--number-of-runs', '3',
-                    '--num-cores', '2',
+                    '--num-processes', '2',
                     'seed=changed',
                 ])
             self.assertEqual(result, 0)
@@ -119,7 +124,7 @@ class TestRunExperiments(unittest.TestCase):
     def test_scheduler_limits_active_processes(self) -> None:
         started = []
 
-        def start_process(_path, seed):
+        def start_process(_path, seed, _backend='autograd', _gpu_id=0):
             started.append(seed)
             return _FakeProcess()
 
@@ -134,7 +139,7 @@ class TestRunExperiments(unittest.TestCase):
     def test_scheduler_stops_after_failure(self) -> None:
         started = []
 
-        def start_process(_path, seed):
+        def start_process(_path, seed, _backend='autograd', _gpu_id=0):
             started.append(seed)
             return _FakeProcess(return_code=1 if seed == 10 else 0)
 
@@ -144,6 +149,22 @@ class TestRunExperiments(unittest.TestCase):
 
         self.assertEqual(result, 1)
         self.assertEqual(started, [10])
+
+    def test_gpu_ids_assigned_round_robin(self) -> None:
+        assigned = []
+
+        def start_process(_path, seed, _backend='jax', gpu_id=0):
+            assigned.append((seed, gpu_id))
+            return _FakeProcess()
+
+        with patch.object(run_experiments, '_start_training', side_effect=start_process), \
+                patch.object(run_experiments.time, 'sleep'):
+            result = run_experiments.launch_runs(
+                'config.yaml', [10, 11, 12, 13, 14], 5, backend='jax', gpu_ids=[0, 1],
+            )
+
+        self.assertEqual(result, 0)
+        self.assertEqual(assigned, [(10, 0), (11, 1), (12, 0), (13, 1), (14, 0)])
 
     def test_child_uses_requested_seed_and_one_thread(self) -> None:
         captured = {}
@@ -162,6 +183,21 @@ class TestRunExperiments(unittest.TestCase):
         for name in ('OMP_NUM_THREADS', 'MKL_NUM_THREADS', 'OPENBLAS_NUM_THREADS'):
             self.assertEqual(captured['env'][name], '1')
         self.assertEqual(captured['env'].get('PATH'), os.environ.get('PATH'))
+        self.assertNotIn('XLA_PYTHON_CLIENT_PREALLOCATE', captured['env'])
+        self.assertNotIn('CUDA_VISIBLE_DEVICES', captured['env'])
+
+    def test_jax_backend_disables_gpu_memory_preallocation_and_pins_gpu(self) -> None:
+        captured = {}
+
+        def popen(command, **kwargs):
+            captured.update(kwargs)
+            return _FakeProcess()
+
+        with patch.object(run_experiments.subprocess, 'Popen', side_effect=popen):
+            run_experiments._start_training('/tmp/config.yaml', 19, backend='jax', gpu_id=1)
+
+        self.assertEqual(captured['env']['XLA_PYTHON_CLIENT_PREALLOCATE'], 'false')
+        self.assertEqual(captured['env']['CUDA_VISIBLE_DEVICES'], '1')
 
     def test_keyboard_interrupt_stops_active_children(self) -> None:
         process = _FakeProcess()
@@ -180,6 +216,43 @@ class TestRunExperiments(unittest.TestCase):
 
         self.assertEqual(result, 130)
         self.assertEqual(process.signals, [signal.SIGINT])
+
+    def test_gpu_id_on_autograd_warns_and_has_no_effect(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = self._config(directory, backend='autograd')
+            with patch.object(run_experiments, 'launch_runs', return_value=0), \
+                    self._capture_stderr() as stderr:
+                run_experiments.main(['--config', config_path, '--gpu-id', '1'])
+        self.assertIn("--gpu-id has no effect for backend='autograd'", stderr.getvalue())
+
+    def test_num_processes_exceeding_gpu_count_warns_under_jax(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = self._config(directory, backend='jax')
+            with patch.object(run_experiments, 'launch_runs', return_value=0), \
+                    self._capture_stderr() as stderr:
+                run_experiments.main([
+                    '--config', config_path, '--num-processes', '3', '--gpu-id', '0,1',
+                ])
+        self.assertIn('no longer maps to physical CPU cores', stderr.getvalue())
+
+    @staticmethod
+    def _capture_stderr():
+        return contextlib.redirect_stderr(io.StringIO())
+
+
+class TestGpuIdList(unittest.TestCase):
+    """gpu_id_list must parse the launcher's --gpu-id syntax and reject bad input."""
+
+    def test_parses_single_and_multiple_ids(self) -> None:
+        self.assertEqual(gpu_id_list('0'), [0])
+        self.assertEqual(gpu_id_list('0,1'), [0, 1])
+        self.assertEqual(gpu_id_list('2,0,1'), [2, 0, 1])
+
+    def test_rejects_non_integer_or_negative_values(self) -> None:
+        for value in ('a', '0,a', '-1', '0,-1'):
+            with self.subTest(value=value):
+                with self.assertRaises(argparse.ArgumentTypeError):
+                    gpu_id_list(value)
 
 
 if __name__ == '__main__':

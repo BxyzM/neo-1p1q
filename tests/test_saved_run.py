@@ -238,6 +238,21 @@ class TestSavedRun(unittest.TestCase):
                 self.root, self.cfg, implementation_signature(self.circuit_dir)
             )
 
+    def test_resume_across_backends_is_rejected(self) -> None:
+        """A jax-backend checkpoint cannot resume under an autograd-configured run
+        (or vice versa) -- caught by the existing exact-config-equality check,
+        confirmed here rather than assumed."""
+        checkpoint_dir = self.root / 'checkpoints'
+        checkpoint_dir.mkdir()
+        checkpoint = self._checkpoint_payload()
+        checkpoint['training']['config']['backend'] = 'jax'
+        (checkpoint_dir / 'ep0000.pickle').write_bytes(pickle.dumps(checkpoint))
+        autograd_cfg = OmegaConf.merge(self.cfg, {'backend': 'autograd'})
+        with self.assertRaisesRegex(ValueError, 'does not match the saved configuration'):
+            load_training_checkpoint(
+                self.root, autograd_cfg, implementation_signature(self.circuit_dir)
+            )
+
     def test_training_entry_point_saves_effective_options_and_final_weights(self) -> None:
         import train
         import evaluate

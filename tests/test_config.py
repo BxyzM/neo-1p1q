@@ -90,11 +90,19 @@ class TestLoadConfig(unittest.TestCase):
                     validate_training_config(cfg)
 
     def test_launcher_options_are_rejected_in_training_config(self):
-        for key in ('number_of_runs', 'num_cores'):
+        for key in ('number_of_runs', 'num_processes'):
             with self.subTest(key=key):
                 cfg = self._run([f'{key}=2'])
                 with self.assertRaisesRegex(ValueError, 'launcher options'):
                     validate_training_config(cfg)
+
+    def test_backend_is_validated(self):
+        cfg = self._run(['backend=jax'])
+        validate_training_config(cfg)  # 'jax' is accepted, does not raise
+
+        cfg = self._run(['backend=torch'])
+        with self.assertRaisesRegex(ValueError, "backend='torch' is not supported"):
+            validate_training_config(cfg)
 
     def test_stopping_settings_are_validated(self):
         invalid = {

@@ -27,7 +27,14 @@ CIRCUIT_FILES = ('base.py', 'registry.py', 'vqc.py')
 
 
 def save_circuit_snapshot(run_dir: str) -> Path:
-    """Copy the circuit package used by training into the run directory."""
+    """Copy the circuit package used by training into the run directory.
+
+    Args:
+        run_dir: Run directory to create a ``circuits/`` subdirectory under.
+
+    Returns:
+        The created ``circuits/`` directory.
+    """
     from quantum.circuits import base
 
     source_dir = Path(base.__file__).resolve().parent
@@ -39,7 +46,17 @@ def save_circuit_snapshot(run_dir: str) -> Path:
 
 
 def _circuit_dir(run_dir: str | Path) -> Path:
-    """Return a complete saved circuit directory or raise with missing files."""
+    """Return a complete saved circuit directory or raise with missing files.
+
+    Args:
+        run_dir: Run directory expected to contain a ``circuits/`` subdirectory.
+
+    Returns:
+        The ``circuits/`` directory, verified to contain all of ``CIRCUIT_FILES``.
+
+    Raises:
+        FileNotFoundError: If any file in ``CIRCUIT_FILES`` is missing.
+    """
     circuit_dir = Path(run_dir) / 'circuits'
     missing = [name for name in CIRCUIT_FILES if not (circuit_dir / name).is_file()]
     if missing:
@@ -50,7 +67,23 @@ def _circuit_dir(run_dir: str | Path) -> Path:
 
 
 def load_circuit_snapshot(run_dir: str | Path) -> ModuleType:
-    """Import a run's saved circuit registry independently of the global package."""
+    """Import a run's saved circuit registry independently of the global package.
+
+    Loads ``circuits/registry.py`` (and its ``base``/``vqc`` siblings) from the
+    run's own snapshot under a digest-named package, so the live repo's
+    ``quantum.circuits`` implementation is never used for circuit construction.
+    Reimporting the same snapshot in the same process reuses the cached module.
+
+    Args:
+        run_dir: Run directory containing a saved ``circuits/`` snapshot.
+
+    Returns:
+        The saved run's ``registry`` module.
+
+    Raises:
+        FileNotFoundError: If the saved circuit files are incomplete.
+        ImportError: If the saved registry cannot be loaded.
+    """
     circuit_dir = _circuit_dir(run_dir)
     digest = hashlib.sha256(
         b''.join((circuit_dir / name).read_bytes() for name in CIRCUIT_FILES)
@@ -74,7 +107,18 @@ def load_circuit_snapshot(run_dir: str | Path) -> ModuleType:
 
 
 def implementation_signature(circuit_dir: str | Path) -> dict[str, str]:
-    """Fingerprint the three circuit files saved with a training run."""
+    """Fingerprint the three circuit files saved with a training run.
+
+    Args:
+        circuit_dir: A run's saved ``circuits/`` directory (its parent, the
+            run directory, is used to re-locate and re-verify it).
+
+    Returns:
+        Mapping from each file in ``CIRCUIT_FILES`` to its SHA-256 hex digest.
+
+    Raises:
+        FileNotFoundError: If any saved circuit file is missing.
+    """
     directory = _circuit_dir(Path(circuit_dir).parent)
     return {
         name: hashlib.sha256((directory / name).read_bytes()).hexdigest()
@@ -83,7 +127,17 @@ def implementation_signature(circuit_dir: str | Path) -> dict[str, str]:
 
 
 def latest_checkpoint(run_dir: str | Path) -> Path:
-    """Return the checkpoint with the greatest numeric epoch."""
+    """Return the checkpoint with the greatest numeric epoch.
+
+    Args:
+        run_dir: Run directory containing a ``checkpoints/`` subdirectory.
+
+    Returns:
+        Path to the ``epNNNN.pickle`` file with the highest epoch number.
+
+    Raises:
+        FileNotFoundError: If no epoch checkpoint files are found.
+    """
     checkpoint_dir = Path(run_dir) / 'checkpoints'
     checkpoints = []
     for path in checkpoint_dir.glob('ep*.pickle'):
@@ -95,12 +149,98 @@ def latest_checkpoint(run_dir: str | Path) -> Path:
     return max(checkpoints, key=lambda item: item[0])[1]
 
 
+def _validate_adam_optimizer_state(optimizer: dict, path: Path, completed_epoch: int) -> None:
+    """Validate a qml.AdamOptimizer checkpoint payload (autograd backend).
+
+    Args:
+        optimizer: The checkpoint's ``'optimizer'`` payload block.
+        path: Checkpoint file path, used only for error messages.
+        completed_epoch: Epoch recorded in the same checkpoint, used to decide
+            whether accumulated Adam moments should be present yet.
+
+    Raises:
+        ValueError: If required fields are missing, hyperparameters are
+            invalid, the accumulation structure doesn't match the epoch, or
+            any moment is nonfinite.
+    """
+    required_optimizer_fields = {'name', 'stepsize', 'beta1', 'beta2', 'eps', 'accumulation'}
+    if not required_optimizer_fields.issubset(optimizer):
+        raise ValueError(f'Checkpoint {path} has incomplete optimizer state.')
+    if not all(np.isfinite(optimizer[key]) for key in ('stepsize', 'beta1', 'beta2', 'eps')):
+        raise ValueError(f'Checkpoint {path} contains invalid optimizer settings.')
+    if (optimizer['stepsize'] <= 0 or optimizer['eps'] <= 0
+            or not 0 <= optimizer['beta1'] < 1 or not 0 <= optimizer['beta2'] < 1):
+        raise ValueError(f'Checkpoint {path} contains invalid Adam hyperparameters.')
+    accumulation = optimizer['accumulation']
+    if completed_epoch == 0:
+        if accumulation is not None:
+            raise ValueError(f'Checkpoint {path} has optimizer moments before training.')
+    elif (not isinstance(accumulation, dict)
+          or any(key not in accumulation for key in ('fm', 'sm', 't'))
+          or not isinstance(accumulation.get('fm'), (list, tuple))
+          or not isinstance(accumulation.get('sm'), (list, tuple))
+          or type(accumulation['t']) is not int
+          or accumulation['t'] < 1):
+        raise ValueError(f'Checkpoint {path} has invalid Adam accumulation state.')
+    if accumulation is not None:
+        moments = [*accumulation['fm'], *accumulation['sm']]
+        if not all(np.all(np.isfinite(moment)) for moment in moments):
+            raise ValueError(f'Checkpoint {path} contains nonfinite Adam moments.')
+
+
+def _validate_optax_optimizer_state(optimizer: dict, path: Path) -> None:
+    """Validate an optax.inject_hyperparams(optax.adam) checkpoint payload (jax backend).
+
+    optax's payload has a completely different field set from qml.AdamOptimizer's
+    (name/opt_state, not name/stepsize/beta1/.../accumulation), so this is a
+    separate validator rather than a branch inside the Adam one.
+
+    Args:
+        optimizer: The checkpoint's ``'optimizer'`` payload block.
+        path: Checkpoint file path, used only for error messages.
+
+    Raises:
+        ValueError: If required fields are missing, the learning rate is
+            invalid, or any optimizer-state leaf is nonfinite.
+    """
+    if not {'name', 'opt_state'}.issubset(optimizer):
+        raise ValueError(f'Checkpoint {path} has incomplete optimizer state.')
+    opt_state = optimizer['opt_state']
+    hyperparams = getattr(opt_state, 'hyperparams', None)
+    if not isinstance(hyperparams, dict) or 'learning_rate' not in hyperparams:
+        raise ValueError(f'Checkpoint {path} has invalid optax hyperparameters.')
+    learning_rate = hyperparams['learning_rate']
+    if not np.isfinite(learning_rate) or learning_rate <= 0:
+        raise ValueError(f'Checkpoint {path} contains an invalid optax learning rate.')
+    import jax
+    leaves = jax.tree_util.tree_leaves(opt_state)
+    if not leaves or not all(np.all(np.isfinite(leaf)) for leaf in leaves):
+        raise ValueError(f'Checkpoint {path} contains nonfinite optax optimizer state.')
+
+
 def load_training_checkpoint(
     run_dir: str | Path,
     cfg: DictConfig,
     signature: dict[str, str],
 ) -> tuple[Path, dict[str, Any]]:
-    """Load and validate the latest resumable training checkpoint."""
+    """Load and validate the latest resumable training checkpoint.
+
+    Args:
+        run_dir: Run directory containing the ``checkpoints/`` subdirectory.
+        cfg: Resolved config the resumed run must exactly match.
+        signature: Expected circuit-file hashes (from `implementation_signature`)
+            the checkpoint must exactly match.
+
+    Returns:
+        Tuple of (checkpoint path, validated payload dict).
+
+    Raises:
+        FileNotFoundError: If no checkpoint exists.
+        ValueError: If the checkpoint is unreadable, or its config, circuit
+            signature, epoch metadata, history, or optimizer state don't
+            match or are internally inconsistent, or training already
+            reached ``cfg.epochs``.
+    """
     path = latest_checkpoint(run_dir)
     try:
         with path.open('rb') as stream:
@@ -137,31 +277,13 @@ def load_training_checkpoint(
     if not all(np.all(np.isfinite(history[key])) for key in ('train', 'val', 'auc')):
         raise ValueError(f'Checkpoint {path} contains nonfinite training history.')
 
-    required_optimizer_fields = {'name', 'stepsize', 'beta1', 'beta2', 'eps', 'accumulation'}
-    if not required_optimizer_fields.issubset(optimizer):
-        raise ValueError(f'Checkpoint {path} has incomplete optimizer state.')
-    if optimizer['name'] != 'AdamOptimizer':
-        raise ValueError(f"Unsupported checkpoint optimizer: {optimizer['name']}.")
-    if not all(np.isfinite(optimizer[key]) for key in ('stepsize', 'beta1', 'beta2', 'eps')):
-        raise ValueError(f'Checkpoint {path} contains invalid optimizer settings.')
-    if (optimizer['stepsize'] <= 0 or optimizer['eps'] <= 0
-            or not 0 <= optimizer['beta1'] < 1 or not 0 <= optimizer['beta2'] < 1):
-        raise ValueError(f'Checkpoint {path} contains invalid Adam hyperparameters.')
-    accumulation = optimizer['accumulation']
-    if completed_epoch == 0:
-        if accumulation is not None:
-            raise ValueError(f'Checkpoint {path} has optimizer moments before training.')
-    elif (not isinstance(accumulation, dict)
-          or any(key not in accumulation for key in ('fm', 'sm', 't'))
-          or not isinstance(accumulation.get('fm'), (list, tuple))
-          or not isinstance(accumulation.get('sm'), (list, tuple))
-          or type(accumulation['t']) is not int
-          or accumulation['t'] < 1):
-        raise ValueError(f'Checkpoint {path} has invalid Adam accumulation state.')
-    if accumulation is not None:
-        moments = [*accumulation['fm'], *accumulation['sm']]
-        if not all(np.all(np.isfinite(moment)) for moment in moments):
-            raise ValueError(f'Checkpoint {path} contains nonfinite Adam moments.')
+    optimizer_name = optimizer.get('name')
+    if optimizer_name == 'AdamOptimizer':
+        _validate_adam_optimizer_state(optimizer, path, completed_epoch)
+    elif optimizer_name == 'optax_adam':
+        _validate_optax_optimizer_state(optimizer, path)
+    else:
+        raise ValueError(f'Unsupported checkpoint optimizer: {optimizer_name}.')
 
     if completed_epoch >= cfg.epochs:
         raise ValueError(
@@ -174,6 +296,16 @@ def resolve_aux_weights(model: QuantumClassifier, aux_overrides: dict | None = N
     """Merge a circuit's aux defaults with overrides, broadcasting any
     circuit-declared per-wire names (see Circuit.aux_per_wire_names) from one
     scalar to one independent value per wire.
+
+    Args:
+        model: Classifier whose circuit implementation and wire count are used.
+        aux_overrides: Config-supplied overrides merged on top of the circuit's
+            ``aux_defaults`` (e.g. ``cfg.aux_weights``).
+
+    Returns:
+        Mapping of aux weight name to its resolved initial value: a scalar,
+        or a list with one entry per wire for each name in
+        ``aux_per_wire_names``.
     """
     merged = {**model._impl.aux_defaults, **(aux_overrides or {})}
     n_wires = len(model.auto_wires)
@@ -183,7 +315,19 @@ def resolve_aux_weights(model: QuantumClassifier, aux_overrides: dict | None = N
 
 
 def validate_weights(model: QuantumClassifier, weights: Any, cfg: DictConfig) -> None:
-    """Reject missing, nonfinite, or incompatible structured circuit weights."""
+    """Reject missing, nonfinite, or incompatible structured circuit weights.
+
+    Args:
+        model: Classifier whose circuit implementation defines the expected
+            rotation shape and aux weight names/shapes.
+        weights: Candidate weights to validate.
+        cfg: Config supplying any ``aux_weights`` overrides.
+
+    Raises:
+        ValueError: If ``weights`` isn't a `CircuitWeights`, its rotation
+            shape or aux weight names/shapes don't match the circuit and
+            config, or any value is nonfinite.
+    """
     if not isinstance(weights, CircuitWeights):
         raise ValueError('The trained model must contain structured CircuitWeights.')
     shape = model._impl.rotation_shape(len(model.auto_wires), model.num_layers)
@@ -204,7 +348,21 @@ def save_trained_run(
     run_dir: str, cfg: DictConfig, model: QuantumClassifier, weights: CircuitWeights,
     history: dict[str, list[float]], signature: dict[str, Any],
 ) -> None:
-    """Write final weights with provenance only after successful training."""
+    """Write final weights with provenance only after successful training.
+
+    Args:
+        run_dir: Run directory containing ``config.yaml`` and ``circuits/``.
+        cfg: Resolved config the run was trained with.
+        model: Classifier used to validate ``weights`` against its circuit.
+        weights: Final trained weights to certify and save.
+        history: Per-epoch train/val loss and AUC history.
+        signature: Circuit-file hashes the saved snapshot must still match.
+
+    Raises:
+        ValueError: If the training history is incomplete or nonfinite, the
+            saved circuit files changed since training started, ``weights``
+            fails validation, or the saved YAML no longer matches ``cfg``.
+    """
     epochs = len(history['train'])
     if (epochs < 1 or len(history['val']) != epochs + 1 or len(history['auc']) != epochs + 1
             or not all(np.all(np.isfinite(history[key])) for key in ('train', 'val', 'auc'))):
@@ -233,7 +391,26 @@ def save_trained_run(
 
 
 def load_trained_run(config_path: str) -> tuple[DictConfig, QuantumClassifier]:
-    """Load the final model beside its YAML, rejecting unverifiable run artifacts."""
+    """Load the final model beside its YAML, rejecting unverifiable run artifacts.
+
+    Reimports the run's own snapshotted circuit implementation (not the live
+    ``quantum.circuits`` package) and installs the certified weights as
+    non-trainable. Emits a `RuntimeWarning` since completed training does not
+    by itself establish convergence.
+
+    Args:
+        config_path: Path to the run's saved ``config.yaml``.
+
+    Returns:
+        Tuple of (loaded config, classifier with verified final weights
+        installed).
+
+    Raises:
+        FileNotFoundError: If ``trained_model.pickle`` is missing.
+        ValueError: If training didn't complete, or the saved config, circuit
+            implementation, or weights don't match what was recorded at
+            training time.
+    """
     path = Path(config_path).expanduser().resolve()
     cfg = OmegaConf.load(path)
     validate_training_config(cfg)

@@ -152,6 +152,19 @@ class TestReportPublication(unittest.TestCase):
             0o644,
         )
 
+    def test_jax_backend_experiment_publishes_without_error(self) -> None:
+        """publish_reports only reads config.yaml/results, never a checkpoint, so it
+        should be backend-agnostic already -- confirmed here rather than assumed."""
+        self._write_run("003", 44, [0.5, 0.6], [0.1, 0.9], [0, 1])
+        config_path = self.models / "003" / "44" / "config.yaml"
+        config = OmegaConf.load(config_path)
+        config.backend = "jax"
+        OmegaConf.save(config, config_path)
+
+        publish_reports.publish_reports(self.models, self.results, self.output, self.site)
+        detail = json.loads((self.output / "data" / "003.json").read_text())
+        self.assertEqual(detail["config"]["execution"]["backend"], "jax")
+
     def test_redacts_paths_and_preserves_missing_artifact_notices(self) -> None:
         self._write_run("001", 40, [0.5, 0.6], [0.1, 0.2, 0.8, 0.9], [0, 0, 1, 1])
         incomplete = self.models / "001" / "41"

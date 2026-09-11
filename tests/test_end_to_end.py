@@ -26,6 +26,12 @@ import quantum.losses as loss
 from helpers.trained_run import latest_checkpoint, resolve_aux_weights
 from quantum.circuits.base import CircuitWeights
 
+try:
+    import optax
+    _HAS_JAX = True
+except ImportError:
+    _HAS_JAX = False
+
 _JETCLASS_DIR = '/ceph/abal/JetClass'
 
 
@@ -82,6 +88,35 @@ def _build_trainer(save_dir: str, batch_size: int, epochs: int, n_qubits: int = 
     return vqc, trainer
 
 
+def _build_jax_trainer(save_dir: str, batch_size: int, epochs: int, n_qubits: int = 4, n_layers: int = 1):
+    """Construct a jax-backend QuantumClassifier + QuantumTrainer pair, ready to train."""
+    onp.random.seed(0)
+    vqc = arch.QuantumClassifier(
+        wires=n_qubits, shots=None, dev_name='default.qubit',
+        layers=n_layers, backend_name='jax', test=False,
+    )
+    vqc.set_circuit('normal', operations_per_qubit=3)
+
+    shape = vqc._impl.rotation_shape(n_qubits, n_layers)
+    rot = np.array(onp.random.uniform(0, np.pi, size=(shape.L, shape.N, shape.R)), requires_grad=True)
+    aux = {k: np.array(v, requires_grad=True) for k, v in resolve_aux_weights(vqc).items()}
+    init_weights = CircuitWeights(rot=rot, aux=aux)
+
+    optimizer = optax.inject_hyperparams(optax.adam)(learning_rate=0.05)
+    trainer = arch.QuantumTrainer(
+        model=vqc, lr=0.05, optimizer=optimizer, loss_fn=loss.VQC_cost,
+        save=True, train_max_n=batch_size * 2, valid_max_n=batch_size * 2,
+        epochs=epochs, wandb=None, loss_type='MSE',
+        checkpoint_config={
+            'epochs': epochs, 'wires': n_qubits, 'num_layers': n_layers,
+        },
+        circuit_signature={'test': 'fixed'},
+        init_weights=init_weights, batch_size=batch_size, logger=__import__('loguru').logger,
+    )
+    trainer.set_directories(save_dir)
+    return vqc, trainer
+
+
 def _run_seeded_training(random_seed: int):
     """Run one finite-shot epoch and inference from an isolated random stream."""
     vqc = arch.QuantumClassifier(
@@ -92,7 +127,7 @@ def _run_seeded_training(random_seed: int):
         backend_name='autograd',
         random_seed=random_seed,
     )
-    vqc.set_circuit('normal', operations_per_qubit=3)
+    vqc.set_circuit('normal', operations_per_qubit=3, diff_method='parameter-shift')
     shape = vqc._impl.rotation_shape(2, 1)
     initial = onp.random.default_rng(random_seed).uniform(
         0, onp.pi, size=(shape.L, shape.N, shape.R)
@@ -336,6 +371,102 @@ class TestFullTrainingLoop(unittest.TestCase):
             self.assertEqual(len(history['train']), 1)
             self.assertEqual(len(history['val']), 2)
             self.assertTrue(onp.isfinite(history['train'][0]))
+
+
+@unittest.skipUnless(_HAS_JAX, 'jax is not installed in this environment')
+class TestJaxFullTrainingLoop(unittest.TestCase):
+    """backend='jax' must run end to end: train, checkpoint, resume, decay -- mirrors
+    TestFullTrainingLoop's autograd coverage."""
+
+    def test_runs_and_checkpoints_with_trained_weights(self) -> None:
+        with tempfile.TemporaryDirectory() as save_dir:
+            vqc, trainer = _build_jax_trainer(save_dir, batch_size=1, epochs=2)
+            train_loader = _make_batches(2, batch_size=1, n_qubits=4, n_layers=1)
+            val_loader = _make_batches(2, batch_size=1, n_qubits=4, n_layers=1)
+
+            initial_rot = onp.array(trainer.current_weights.rot)
+            history = trainer.run_training_loop(train_loader, val_loader)
+
+            self.assertEqual(len(history['train']), 2)
+            self.assertEqual(len(history['val']), 3)
+            self.assertEqual(len(history['auc']), 3)
+            for v in history['train'] + history['val']:
+                self.assertTrue(onp.isfinite(v))
+
+            checkpoint_dir = os.path.join(save_dir, 'checkpoints')
+            self.assertEqual(
+                sorted(os.listdir(checkpoint_dir)),
+                ['ep0000.pickle', 'ep0001.pickle', 'ep0002.pickle'],
+            )
+            # The critical fix (P11): trained weights must actually differ from the
+            # initial ones -- catches a silent current_weights/jax_params desync.
+            self.assertFalse(onp.allclose(initial_rot, onp.array(trainer.current_weights.rot)))
+            final_checkpoint = ut.Unpickle(latest_checkpoint(save_dir))
+            onp.testing.assert_allclose(
+                onp.array(final_checkpoint['weights'].rot), onp.array(trainer.current_weights.rot)
+            )
+
+    def test_decay_after_minimum_epochs_then_early_stop(self) -> None:
+        """Three failed post-warmup checks decay the injected optax learning rate
+        before stopping training."""
+        with tempfile.TemporaryDirectory() as save_dir:
+            _, trainer = _build_jax_trainer(save_dir, batch_size=1, epochs=30)
+            trainer.saving = False
+            trainer.min_epochs = 10
+            trainer.decay_rate = 0.5
+            trainer.decay_patience = 3
+
+            def constant_iteration(
+                data: np.ndarray, labels: np.ndarray, train: bool = False,
+            ) -> float | tuple[float, np.ndarray]:
+                if train:
+                    return 0.25
+                return 0.25, np.full(len(labels), 0.5)
+
+            trainer.iteration = constant_iteration
+            batches = _make_batches(2, batch_size=1, n_qubits=4, n_layers=1)
+            history = trainer.run_training_loop(batches, batches)
+
+            self.assertEqual(len(history['train']), 13)
+            self.assertEqual(trainer.n_decays, 3)
+            self.assertAlmostEqual(
+                float(trainer.jax_opt_state.hyperparams['learning_rate']), 0.05 * 0.5**3
+            )
+
+    def test_checkpoint_round_trip_and_resume_training(self) -> None:
+        """A resumed jax/optax step must match an uninterrupted step's trajectory
+        exactly -- not just approximately (Adam moments/count carry over)."""
+        with tempfile.TemporaryDirectory() as save_dir, tempfile.TemporaryDirectory() as resumed_dir:
+            _, trainer = _build_jax_trainer(save_dir, batch_size=1, epochs=2)
+            first = np.array(onp.random.uniform(-1, 1, size=(1, 4, 3)))
+            second = np.array(onp.random.uniform(-1, 1, size=(1, 4, 3)))
+            labels = onp.array([1])
+            first_cost = trainer.iteration(first, labels=labels, train=True)
+            trainer.current_epoch = 1
+            trainer.history = {
+                'train': [first_cost], 'val': [0.6, 0.5], 'auc': [0.5, 0.6],
+            }
+            checkpoint = trainer.save_checkpoint()
+            payload = ut.Unpickle(checkpoint)
+
+            expected_cost = trainer.iteration(second, labels=labels, train=True)
+            expected_weights = trainer.current_weights
+
+            _, resumed = _build_jax_trainer(resumed_dir, batch_size=1, epochs=2)
+            resumed.restore_checkpoint(payload)
+            actual_cost = resumed.iteration(second, labels=labels, train=True)
+
+            self.assertEqual(resumed.current_epoch, 2)
+            self.assertEqual(resumed.history, payload['training']['history'])
+            self.assertAlmostEqual(actual_cost, expected_cost, places=12)
+            onp.testing.assert_allclose(
+                onp.array(resumed.current_weights.rot), onp.array(expected_weights.rot)
+            )
+            for name in expected_weights.aux:
+                onp.testing.assert_allclose(
+                    onp.array(resumed.current_weights.aux[name]),
+                    onp.array(expected_weights.aux[name]),
+                )
 
 
 class TestEvaluateEquivalentInference(unittest.TestCase):

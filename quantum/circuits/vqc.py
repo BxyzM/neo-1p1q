@@ -14,8 +14,19 @@ from .base import CircuitBase, CircuitWeights
 
 
 def sigmoid(x: Union[float, np.ndarray]) -> Union[float, np.ndarray]:
-    """Sigmoid activation function."""
-    return 1 / (1 + np.exp(-x))
+    """Sigmoid activation function.
+
+    qml.math dispatches most ops correctly for both the autograd and jax
+    interfaces, but its exp does not trace correctly under either one in
+    this PennyLane version -- use each interface's own exp instead (see
+    the identical logaddexp branch in quantum/math_functions.py).
+    """
+    if qml.math.get_interface(x) == 'jax':
+        import jax.numpy as jnp
+        exp = jnp.exp(-x)
+    else:
+        exp = np.exp(-x)
+    return 1 / (1 + exp)
 
 
 class VQCCircuit(CircuitBase):

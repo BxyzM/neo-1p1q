@@ -1,6 +1,13 @@
 # Repository guide for future agents
 
-This document describes the repository as it exists on 2026-09-09. Read either `AGENTS.md` or `.claude/CLAUDE.md` (this redirects back to `AGENTS.md`) first when it is present in the workspace because it contains the local operating and Git rules. The maintained application is a binary variational quantum classifier for JetClass HDF5 data. The supported entry points are `train.py`, `run_experiments.py`, and `evaluate.py`.
+This document describes the repository as it exists on 2026-09-11. Read either `AGENTS.md` or `.claude/CLAUDE.md` (this redirects back to `AGENTS.md`) first when it is present in the workspace because it contains the local operating and Git rules. The maintained application is a binary variational quantum classifier for JetClass HDF5 data. The supported entry points are `train.py`, `run_experiments.py`, and `evaluate.py`.
+
+## Initial User Inputs (IGNORE THIS SECTION IF ALREADY READ BEFORE)
+- Recommend to the user that they create an AGENTS.md file (if using Codex) or a .claude/CLAUDE.md file (if using Claude Code). 
+- Warn the user that the @configs/base.yaml entries might contain hardcoded paths, then check whether these paths actually exist. Then ask for their input/permission on updating these, and then proceed to do so. 
+- This project uses WandB and also creates an interactive report. The two points below summarize the requirements. 
+- `train.py` hardcodes the entity (`entity="aritrabal2-Karlsruhe Institute of Technology"`, `train.py:86`) and project (`"neo1P1Q"`) in its `wandb.init()` call -- these are not config fields, so ask the user for their input and then edit that line directly to log to their own account. Tell the user that WANDB_API_KEY must be present in a `.env` file or declared as an environment variable. 
+- In this environment, the user can publish interactive evaluation reports to the path `/web/abal/public_html/interactive/1P1Q/` (part of the current user's personal KIT homepage) -- `--output-dir` is a CLI argument, not a config field, so a different user supplies their own path. Ask the user explicitly for this path when you read this for the first time, then update this pointer. 
 
 ## Current scope
 
@@ -8,7 +15,7 @@ The active path supports one dataset format and one circuit family:
 
 - JetClass signal versus background classification.
 - The `normal` variational quantum classifier registered in `quantum/circuits/registry.py`.
-- PennyLane Autograd with Adam optimization.
+- JAX with Optax/Adam (recommended, GPU-accelerated -- see [JAX backend (recommended)](#jax-backend-recommended)), or PennyLane Autograd with Adam (fallback, required for finite-shot execution).
 - MSE or binary cross entropy with logits.
 - Training, epoch checkpoints, resumption, final model certification, and evaluation.
 - Reproducible random-seed runs and bounded parallel launch of repeated training.
@@ -17,27 +24,43 @@ There is no active QAE, VPC, AOJ, probabilistic-output, or private Delphes workf
 
 ## Environment and common commands
 
-Use the Conda environment `pennylane-gpu-sep2026` for repository work. The environment verified on 2026-09-09 contains Python 3.14.7, PennyLane 0.45.1, and PennyLane-Lightning 0.45.0. The inherited shell may still report Conda `base`, so use `conda run` when there is any doubt:
+Use the Conda environment `pennylane-gpu-jax-sep2026` for repository work -- the one supported environment. It runs both backends: `backend: 'jax'` (GPU-accelerated, recommended) and `backend: 'autograd'` (CPU-only fallback, needed only for finite-shot runs) without switching environments -- verified by running the full test suite under it (all 89 tests pass, none skipped). The environment verified on 2026-09-11 contains Python 3.14.7, PennyLane 0.45.1, PennyLane-Lightning 0.45.0, `jax==0.10.2`, and `optax==0.2.8`; see [JAX backend (recommended)](#jax-backend-recommended) for why jax is pinned and what building this environment involves. The inherited shell may still report Conda `base`, so use `conda run` when there is any doubt:
 
 ```bash
-conda run -n pennylane-gpu-sep2026 python --version
-conda run -n pennylane-gpu-sep2026 python -m unittest discover -s tests -q
+conda run -n pennylane-gpu-jax-sep2026 python --version
+conda run -n pennylane-gpu-jax-sep2026 python -m unittest discover -s tests -q
 ```
 
-`requirements.txt` contains lower bounds for direct runtime dependencies. It is an installation list rather than an exact environment lock. The default simulator is `lightning.qubit`. Every QNode is built with `diff_method='parameter-shift'` (see `QuantumClassifier.set_circuit()`), not the device's default `best` (which resolves to adjoint on `lightning.qubit` and cannot differentiate Hamiltonian coefficients -- see below).
+`requirements.txt` pins the exact versions needed to reproduce `pennylane-gpu-jax-sep2026` (jax is sensitive to version drift; see below) and is the recommended way to build a new environment. The default simulator is `default.qubit` with `diff_method: 'backprop'` (both configurable in `configs/base.yaml`; see below and `configs/README.md`). `QuantumClassifier.set_circuit()`'s `diff_method` argument is validated at QNode construction time -- an incompatible device/diff_method/shots combination (e.g. `backprop` with `lightning.qubit` or with finite shots) raises a `ValueError` naming the conflict and suggesting `parameter-shift`, instead of PennyLane's raw traceback. `QuantumClassifier.from_config()` falls back to PennyLane's own default (`'best'`) when a saved config predates the `diff_method` field, reproducing historical behaviour for old runs rather than forcing `backprop` on them.
 
 Training initializes Weights & Biases even when no online account is wanted. Set offline mode for local work:
 
 ```bash
-WANDB_MODE=offline conda run -n pennylane-gpu-sep2026 \
+WANDB_MODE=offline conda run -n pennylane-gpu-jax-sep2026 \
   python train.py seed=run_001 random_seed=42 data_dir=/path/to/JetClass
 ```
 
 Inspect the merged configuration without starting training:
 
 ```bash
-conda run -n pennylane-gpu-sep2026 python train.py --print-config
+conda run -n pennylane-gpu-jax-sep2026 python train.py --print-config
 ```
+
+`configs/base.yaml`'s literal default is `backend: 'jax'`; pass `backend=autograd` explicitly for the CPU fallback, e.g. for finite-shot runs.
+
+## JAX backend (recommended)
+
+`backend: 'jax'` is a PennyLane QNode `interface` value, GPU-accelerated via `jax.jit` and `optax.adam`; it is `configs/base.yaml`'s default and the recommended backend for new runs on GPU hardware. `backend: 'autograd'` is the CPU fallback and is required whenever finite-shot execution (`shots>0`) is needed, since jax has no finite-shot path.
+
+- `jax==0.10.2` is pinned in `requirements.txt` -- PennyLane 0.45.1's jax interface depends on a `jax.core` API removed in JAX 0.11; a later `jax` silently breaks `adjoint`/`parameter-shift`/`jax.jit` while plain `backprop` still appears to work.
+- Analytic execution only (`shots<=0`); `set_circuit()` raises `ValueError` for `backend='jax'` with `shots>0`.
+- `QuantumClassifier.__init__` enables `jax.config.update("jax_enable_x64", True)` once, as its first action, only when `backend='jax'` -- JAX defaults to float32 otherwise, silently diverging from the autograd path's float64 baseline.
+- Training uses `optax.inject_hyperparams(optax.adam)` instead of `qml.AdamOptimizer`, with its own checkpoint schema (`optimizer.name == 'optax_adam'`, `optimizer.opt_state` numpy-converted for portable pickling) validated by a separate function in `helpers/trained_run.py`. Learning-rate decay mutates `opt_state`'s injected `learning_rate` field directly (no optimizer reconstruction, no jit recompile).
+- `QuantumTrainer._jax_train_step` is a single `jax.jit`-compiled Adam step, built once per trainer (not per call, so jit's compilation cache applies) and retraced at most twice per run (regular batch shape, smaller final partial batch).
+- `QuantumTrainer.current_weights` (read by validation, checkpointing, and final certification regardless of backend) is written back from the jax-native `jax_params` on every training call inside `iteration()` -- this sync is load-bearing; without it, training looks normal while validation/checkpoints/the certified model silently keep the untrained initial weights.
+- `run_experiments.py` sets `XLA_PYTHON_CLIENT_PREALLOCATE=false` in a jax-backend child's environment (JAX's default eager GPU memory preallocation can OOM a second concurrent jax subprocess on a shared GPU otherwise), and pins each child to one GPU via `--gpu-id`/`CUDA_VISIBLE_DEVICES` (see [Configuration behavior](#configuration-behavior)).
+- `jax[cuda12_local]` (the `requirements.txt` extra) assumes a system CUDA 12.x toolkit already on `LD_LIBRARY_PATH`; on a machine where pip's own CUDA wheels conflict with it (silent CPU fallback -- `jax.devices()` reports no `CudaDevice`), see the troubleshooting comment above `jax[cuda12_local]` in `requirements.txt` for the manual `pip uninstall` fix.
+- Not implemented: finite-shot (`shots>0`) execution under `backend='jax'`.
 
 ## Maintained source map
 
@@ -58,8 +81,9 @@ conda run -n pennylane-gpu-sep2026 python train.py --print-config
 | `quantum/math_functions.py` | Small differentiable MSE and stable BCE-with-logits implementations. |
 | `helpers/config.py` | OmegaConf loading, CLI parsing, config saving, and evaluation config lookup. |
 | `helpers/trained_run.py` | Circuit snapshots, fingerprints, checkpoint validation, final model validation, and saved-run reconstruction. |
-| `helpers/utils.py` | Feature index constants and general pickle helpers still used by training and evaluation. |
-| `tests/` | Unit, integration, checkpoint, reconstruction, and data-loader tests. |
+| `helpers/utils.py` | Feature index constants, `sigmoid()`, and general pickle helpers still used by training and evaluation. |
+| `report_site/` | Static frontend (`index.html`, `assets/app.js`, `assets/styles.css`) rendered by `publish_reports.py`'s output; dark theme by default. |
+| `tests/` | Unit, integration, checkpoint, reconstruction, data-loader, and report-publication tests. |
 
 The repository uses namespace packages and has no tracked `__init__.py` files under `helpers/` or `quantum/`. Run commands from the repository root so those imports resolve naturally.
 
@@ -136,17 +160,17 @@ python train.py --config /path/to/another.yaml seed=run_003
 
 OmegaConf accepts new entries as well as overrides. Every resolved entry is written to the run's `config.yaml`, including new keys and interpolated values. A new run converts `save_dir`, `data_dir`, and `dump` to absolute paths before saving.
 
-The authoritative field reference is `configs/README.md`. The settings that define the circuit are `wires`, `num_layers`, `shots`, `device_name`, `backend`, `circuit_type`, `operations_per_qubit`, and `aux_weights`. `random_seed` is part of each training run. `--number-of-runs` and `--num-cores` belong only to `run_experiments.py` and are never saved in a model configuration.
+The authoritative field reference is `configs/README.md`. The settings that define the circuit are `wires`, `num_layers`, `shots`, `device_name`, `backend`, `circuit_type`, `operations_per_qubit`, and `aux_weights`. `random_seed` is part of each training run. `--number-of-runs`, `--num-processes`, and `--gpu-id` belong only to `run_experiments.py` and are never saved in a model configuration.
 
 Launch repeated runs with:
 
 ```bash
 python run_experiments.py --config configs/base.yaml \
-  --number-of-runs 10 --num-cores 4 \
+  --number-of-runs 10 --num-processes 4 --gpu-id 0,1 \
   seed=experiment_001
 ```
 
-This launches 10 runs, each with its own random seed generated by NumPy's default RNG, and keeps at most four one-thread training subprocesses active. A `random_seed=` override on the launcher's own CLI is rejected; that field is only meaningful when calling `train.py` directly. The launcher rejects resume mode, freezes the resolved input in a temporary YAML for the duration of the launch, and stops scheduling new work after a child failure.
+This launches 10 runs, each with its own random seed generated by NumPy's default RNG, and keeps at most four training subprocesses active at once. `--num-processes` and `--gpu-id` are independent: `--num-processes` alone bounds concurrency (as many CPU-bound one-thread subprocesses as requested for `backend='autograd'`); for `backend='jax'`, `--gpu-id` (default `0`) additionally restricts each launched process to exactly one GPU from the list, assigned round-robin via `CUDA_VISIBLE_DEVICES` -- without it, every jax process registers a small memory footprint on every visible GPU at startup regardless of which one it actually computes on. If `--num-processes` exceeds the number of listed GPUs, multiple processes share a GPU's compute (verified safe, just slower per run than a dedicated GPU); `--gpu-id` has no effect for `backend='autograd'`, which has no GPU-accelerated code path in this pipeline. A `random_seed=` override on the launcher's own CLI is rejected; that field is only meaningful when calling `train.py` directly. The launcher rejects resume mode, freezes the resolved input in a temporary YAML for the duration of the launch, and stops scheduling new work after a child failure.
 
 Evaluation has a separate parser. It accepts exactly one source:
 
@@ -156,7 +180,7 @@ python evaluate.py --seed run_001 --random-seed 42 --model-dir /models
 python evaluate.py --experiment-dir /models/run_001 --num-cores 4
 ```
 
-It rejects training overrides and ambiguous sources. When `--model-dir` is omitted, single-run seed lookup uses `save_dir` from the current base config. `--num-cores` is valid only with `--experiment-dir` and is not a saved configuration field.
+It rejects training overrides and ambiguous sources. When `--model-dir` is omitted, single-run seed lookup uses `save_dir` from the current base config. `--num-cores` is valid only with `--experiment-dir` and is not a saved configuration field. Evaluation reruns whichever `backend` the loaded run was trained with; it is not a separate choice.
 
 Publish every numeric experiment as a static interactive report with:
 
@@ -191,7 +215,7 @@ For the maintained `VQCCircuit`:
 - The trainable scale is `2 * pi * sigmoid(aux_weights.scale_factor) + 1`.
 - Entanglement is a CNOT ring from each wire to the next, with the last wire connected to wire 0.
 - Trainable gates are `Rot(0, ry, rz)` followed by `RX(rx)` on each wire.
-- Measurement is the expectation value of a Hamiltonian containing one Pauli Z term per wire. Each wire's coefficient is independently trainable, all starting from `aux_weights.hamiltonian_coeffs` (default 0.1). This requires a differentiation method that supports Hamiltonian/observable coefficients: PennyLane's adjoint method (the default `best` resolution for `lightning.qubit`) cannot differentiate them and silently returns a zero gradient, freezing `hamiltonian_coeffs` at its initial value while `rot`/`scale_factor`/`bias` still train normally. `parameter-shift` does not have this limitation -- a coefficient's gradient is just the expectation value of its own Pauli term, no gate shifting needed -- so every QNode is built with `diff_method='parameter-shift'` explicitly (verified directly: nonzero, independent per-wire gradients on `lightning.qubit`).
+- Measurement is the expectation value of a Hamiltonian containing one Pauli Z term per wire. Each wire's coefficient is independently trainable, all starting from `aux_weights.hamiltonian_coeffs` (default 0.1). This requires a differentiation method that supports Hamiltonian/observable coefficients: PennyLane's adjoint method (the default `best` resolution for `lightning.qubit`) cannot differentiate them and silently returns a zero gradient, freezing `hamiltonian_coeffs` at its initial value while `rot`/`scale_factor`/`bias` still train normally. `backprop` (the current default, paired with `default.qubit`) and `parameter-shift` (works on any device/shot count, including `lightning.qubit`, at the cost of roughly two circuit evaluations per differentiable parameter per step) both differentiate `hamiltonian_coeffs` correctly -- verified directly for both. `adjoint` is the only common option that silently fails for this parameter.
 
 `CircuitWeights` separates parameters into:
 
@@ -200,7 +224,7 @@ For the maintained `VQCCircuit`:
 
 The default `operations_per_qubit` is 3 and matches the RZ, RY, and RX parameters consumed by `VQCCircuit.rotate()`.
 
-`VQC_cost()` adds the trainable bias to the Hamiltonian expectation. That value is the classifier score. MSE compares the raw score with the label. BCE treats the score as a logit and uses the stable expression `logaddexp(0, logit) - label * logit`. The maintained pipeline does not convert scores to probabilities.
+`VQC_cost()` adds the trainable bias to the Hamiltonian expectation. That value is the classifier score. MSE compares the raw score with the label. BCE treats the score as a logit and uses the stable expression `logaddexp(0, logit) - label * logit`. The maintained pipeline does not convert scores to probabilities. `VQC_cost()`, `mean_squared_error()`, and `binary_cross_entropy_with_logits()` use `qml.math` instead of `pennylane.numpy` directly (except for one explicit interface branch each, in `binary_cross_entropy_with_logits()`'s `logaddexp` and `VQCCircuit.sigmoid()`'s `exp` -- `qml.math`'s own dispatch for those two ops is unreliable under both interfaces in this PennyLane version), so the same loss/circuit code runs under both `backend` values.
 
 ## Training flow
 
@@ -323,21 +347,22 @@ The snapshot boundary covers `base.py`, `registry.py`, and `vqc.py`. Data prepro
 Run the complete suite from the repository root:
 
 ```bash
-MPLCONFIGDIR=/tmp/matplotlib conda run -n pennylane-gpu-sep2026 \
+MPLCONFIGDIR=/tmp/matplotlib conda run -n pennylane-gpu-jax-sep2026 \
   python -m unittest discover -s tests -q
 ```
 
-The suite contained 66 passing tests at the last verification on 2026-09-09. JetClass integration tests are guarded with `skipUnless` and run only when `/ceph/abal/JetClass/test/TTBar_` and `/ceph/abal/JetClass/test/ZJetsToNuNu` exist.
+The suite contained 89 tests at the last verification on 2026-09-11, all passing under `pennylane-gpu-jax-sep2026` (jax installed, so no jax-backend tests are skipped; they are guarded with `skipUnless(_HAS_JAX, ...)` for environments without jax). JetClass integration tests are separately guarded with `skipUnless` and run only when `/ceph/abal/JetClass/test/TTBar_` and `/ceph/abal/JetClass/test/ZJetsToNuNu` exist (true in this environment, so they run as part of the full suite).
 
 | Test file | Coverage |
 | --- | --- |
 | `test_bce_logits.py` | BCE value and gradient parity with PyTorch, including gradients through circuit output and bias. |
 | `test_circuit_base.py` | Rotation shape bounds, Hamiltonian coefficient length, and circuit registry errors. |
-| `test_circuit_parity.py` | VQC wiring parity and a fixed golden expectation value. |
+| `test_circuit_parity.py` | VQC wiring parity, a fixed golden expectation value, and `diff_method` validation errors. |
 | `test_circuit_weights_checkpoint.py` | Pickle round trip for structured rotation and auxiliary weights. |
 | `test_config.py` | Typed and nested OmegaConf overrides, random-seed validation, run paths, resume flag, config printing, and byte-stable save/load. |
 | `test_end_to_end.py` | Training, finite-shot reproducibility, sample-weighted partial batches, inference cardinality, checkpoints, Adam resumption, and optional real JetClass loading. |
 | `test_evaluate_experiment.py` | Experiment discovery, incomplete-run logging, bounded evaluation parallelism, interruption, thread limits, and aggregate ROC reporting. |
+| `test_publish_reports.py` | Report JSON structure, path redaction, and aggregate/per-run plot data (including score-distribution histograms). |
 | `test_run_experiments.py` | Launcher configuration ownership, random seed generation, concurrency limits, failure handling, interruption, and child thread limits. |
 | `test_saved_run.py` | Saved circuit imports, legacy compatibility, nested paths, config and hash mismatch rejection, final weight validation, checkpoint provenance, CLI restrictions, and mocked training-to-evaluation flow. |
 
@@ -370,7 +395,7 @@ When changing checkpoint or final-model schemas, update both writer and validato
 
 ## Docker
 
-`docker/Dockerfile` builds a Python 3.14 package environment from `requirements.txt`. It intentionally contains no repository source. Build from the repository root, then mount the checkout at `/workspace`; exact commands are in `docker/README.md`.
+`docker/Dockerfile` builds a Python 3.14 package environment from `requirements.txt`. It intentionally contains no repository source. Build from the repository root, then mount the checkout at `/workspace`; exact commands are in `docker/README.md`. `requirements.txt` now targets the jax-capable environment (see [JAX backend (recommended)](#jax-backend-recommended)); a GPU-visible container additionally needs a matching CUDA 12.x runtime.
 
 Docker CLI is installed on the current machine, but the current user cannot access `/var/run/docker.sock`. The Dockerfile has received static input and syntax review here, but no local image build has been completed in this workspace.
 
@@ -383,7 +408,6 @@ These files are not called by `train.py` or `evaluate.py`:
 - `helpers/get_free_gpu_id.py` is an unused NVIDIA selection helper. It imports pandas, which is not a maintained runtime dependency.
 - `plotters/plot_hist.py` expects older fidelity and cost arrays from a quantum autoencoder workflow.
 - `network_runs/logs.log` is a historical output.
-- `summary.txt` is an old task prompt, not application documentation.
 
 Within maintained modules, `select_subjet_constituents`, the semiclassical loss functions, `batched_VQC_cost`, `QuantumClassifier.load_weights`, and the evictable EOS path are not used by the supported entry points. Do not build new behavior on them without first confirming that the user wants those paths restored.
 

@@ -60,11 +60,12 @@ The default paths are relative to the directory where the command is run. Overri
 python run_experiments.py \
   --config configs/base.yaml \
   --number-of-runs 10 \
-  --num-cores 4 \
+  --num-processes 4 \
+  --gpu-id 0,1 \
   seed=experiment_001
 ```
 
-`--number-of-runs` and `--num-cores` default to 1. They belong to the launcher, not the YAML, and are not saved with a model. Each subprocess uses one computational thread, so `--num-cores 4` permits at most four simultaneous training processes. The launcher does not resume runs; resume an individual saved configuration with `train.py --resume`. `random_seed` is generated per run and rejected as an override on `run_experiments.py`; set it directly only when calling `train.py`.
+`--number-of-runs`, `--num-processes`, and `--gpu-id` belong to the launcher, not the YAML, and are not saved with a model. `--number-of-runs` and `--num-processes` default to 1; `--gpu-id` defaults to `0`. `--num-processes` is the maximum number of simultaneous training processes, independent of GPU count in either direction: it can exceed the number of GPUs listed in `--gpu-id` (processes then share a GPU's compute -- safe, just slower per run) or be smaller than it (some listed GPUs go unused that round). `--gpu-id` only affects `backend='jax'` runs (this pipeline has no GPU-accelerated `autograd` path); each launched process is assigned one GPU from the list in round-robin order via `CUDA_VISIBLE_DEVICES`, so it only ever sees and uses that one GPU. The launcher does not resume runs; resume an individual saved configuration with `train.py --resume`. `random_seed` is generated per run and rejected as an override on `run_experiments.py`; set it directly only when calling `train.py`.
 
 ## Data entries
 
@@ -97,8 +98,9 @@ The circuit consumes `wires * num_layers` particles per jet by default. Set `num
 | `wires` | Number of data qubits. |
 | `num_layers` | Number of encoding, entangling, and trainable rotation layers. Each layer consumes another group of `wires` particles. |
 | `shots` | Number of measurement shots. The default `-1` selects analytic expectation values. |
-| `device_name` | PennyLane device name. The default is the fast CPU simulator `lightning.qubit`. Every QNode is built with `diff_method='parameter-shift'` (not the device default, which resolves to adjoint on `lightning.qubit` and cannot differentiate `aux_weights.hamiltonian_coeffs`, silently freezing them at their initial value). |
-| `backend` | PennyLane QNode interface. The maintained training path uses `autograd`. |
+| `device_name` | PennyLane device name. The default is `default.qubit`. |
+| `diff_method` | PennyLane QNode differentiation method. The default is `backprop`, which differentiates `aux_weights.hamiltonian_coeffs` correctly but only works with an analytic (`shots: -1`), backprop-capable device such as `default.qubit`. `parameter-shift` works on any device and any shot count (including finite shots and `lightning.qubit`) at the cost of more circuit evaluations per step. `adjoint` is fast on statevector simulators like `lightning.qubit` but cannot differentiate `hamiltonian_coeffs` -- it silently returns a zero gradient for them. An incompatible combination (e.g. `backprop` with finite shots or `lightning.qubit`) raises a `ValueError` naming the conflict and suggesting `parameter-shift`. |
+| `backend` | PennyLane QNode interface. `configs/base.yaml`'s default is `jax` (GPU-accelerated via `jax.jit` and `optax.adam`); pass `backend=autograd` for the CPU fallback. Both run in the same `pennylane-gpu-jax-sep2026` conda env (pinned `jax==0.10.2` -- do not let it float to a newer version). `jax` supports analytic execution only (`shots` must be `<=0`, rejected otherwise); `autograd` is required whenever `shots>0`. The jax path trains with `optax.adam` (wrapped in `optax.inject_hyperparams` for learning-rate decay) instead of `qml.AdamOptimizer`, and has its own checkpoint schema (`optimizer.name == 'optax_adam'`). See `llm_summary.MD` for the full design and known pitfalls. |
 | `circuit_type` | Circuit name from `quantum/circuits/registry.py`. The supported value is `normal`. |
 | `operations_per_qubit` | Trainable rotation parameters per qubit and layer. The current VQC requires `3` for its RZ, RY, and RX rotations. |
 | `aux_weights.scale_factor` | Initial trainable scale applied during angle encoding. |

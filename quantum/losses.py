@@ -5,6 +5,7 @@ Author: Aritra Bal (ETP)
 Date: 2026-09-09
 """
 
+import pennylane as qml
 import pennylane.numpy as np
 import tqdm
 from typing import Callable, Dict
@@ -58,19 +59,17 @@ def VQC_cost(weights,inputs=None,quantum_circuit=None,labels=None,return_scores=
     Flatten the circuit outputs and apply the loss registered under loss_type.
     BCE consumes logits and MSE consumes raw scores. If return_scores is True,
     return (loss, raw scores). Unknown loss names raise ValueError. reg is unused.
+    Uses qml.math so this works under both the autograd and jax interfaces.
     """
     bias=weights.aux['bias']
-    exp_vals=np.reshape(
-        np.array(quantum_circuit(weights,inputs),requires_grad=True),
-        (-1,),
-    )
+    exp_vals=qml.math.reshape(quantum_circuit(weights,inputs), (-1,))
     score=exp_vals+bias
     if loss_type not in LOSS_FNS:
         raise ValueError(f"Unknown loss_type '{loss_type}'. Registered: {list(LOSS_FNS)}")
     loss_fn=LOSS_FNS[loss_type](labels,score)
     if return_scores:
         return loss_fn, score
-    return np.array(loss_fn,requires_grad=True)
+    return qml.math.array(loss_fn)
 
 def batched_VQC_cost(weights,inputs=None,quantum_circuit=None,labels=None,return_scores=False,loss_type='MSE',reg=1.):
     """Evaluate inputs individually and return the mean registered classifier loss.

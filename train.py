@@ -205,7 +205,14 @@ def main(cfg: DictConfig):
     )
 
     # Initialize Adam with either the configured settings or the saved settings.
-    if resume:
+    # The jax backend always builds the same wrapped-adam transformation --
+    # optax.inject_hyperparams keeps the learning rate inside opt_state itself,
+    # and restore_checkpoint() overwrites that state wholesale on resume, so
+    # there is nothing backend-specific to read from the checkpoint here.
+    if cfg.backend == 'jax':
+        import optax
+        optimizer = optax.inject_hyperparams(optax.adam)(learning_rate=cfg.lr)
+    elif resume:
         optimizer_state = checkpoint['optimizer']
         optimizer = qml.AdamOptimizer(
             stepsize=optimizer_state['stepsize'],

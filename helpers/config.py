@@ -19,7 +19,8 @@ from omegaconf import DictConfig, OmegaConf
 # Anchored to the repo root (parent of helpers/) so it resolves regardless of cwd.
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEFAULT_CONFIG = os.path.join(_REPO_ROOT, "configs", "base.yaml")
-ORCHESTRATION_KEYS = ('number_of_runs', 'num_cores')
+ORCHESTRATION_KEYS = ('number_of_runs', 'num_processes')
+SUPPORTED_BACKENDS = ('autograd', 'jax')
 SINGLE_THREAD_ENV = {
     'OMP_NUM_THREADS': '1',
     'MKL_NUM_THREADS': '1',
@@ -32,6 +33,19 @@ def positive_integer(value: str) -> int:
     parsed = int(value)
     if parsed < 1:
         raise argparse.ArgumentTypeError('must be at least 1')
+    return parsed
+
+
+def gpu_id_list(value: str) -> list[int]:
+    """Parse a comma-separated list of non-negative GPU indices, e.g. '0' or '0,1'."""
+    try:
+        parsed = [int(item) for item in value.split(',')]
+    except ValueError as error:
+        raise argparse.ArgumentTypeError(
+            f"'{value}' is not a comma-separated list of integers"
+        ) from error
+    if any(gpu_id < 0 for gpu_id in parsed):
+        raise argparse.ArgumentTypeError('GPU indices must be non-negative')
     return parsed
 
 
@@ -60,6 +74,11 @@ def validate_training_config(cfg: DictConfig, require_random_seed: bool = False)
         raise ValueError('decay_patience must be an integer greater than or equal to 1.')
     if type(decay_rate) not in (int, float) or not 0 < decay_rate < 1:
         raise ValueError('decay_rate must be greater than 0 and less than 1.')
+    backend = cfg.get('backend')
+    if backend is not None and backend not in SUPPORTED_BACKENDS:
+        raise ValueError(
+            f"backend='{backend}' is not supported. Use one of {SUPPORTED_BACKENDS}."
+        )
     if 'random_seed' not in cfg or cfg.random_seed is None:
         if require_random_seed:
             raise ValueError('New training runs require an integer random_seed.')
