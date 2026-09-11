@@ -193,10 +193,21 @@ python publish_reports.py --models-dir saved_models --results-dir results \
 
 The publisher copies the frontend in `report_site/`, writes one JSON document per experiment,
 and replaces the experiment index last. Published data includes aggregate and individual
-validation AUC and ROC curves, and per-run classifier score distributions (a 30-bin
-signal/background density histogram, shown per seed only -- there is no aggregate view), but
-excludes raw event scores, labels, and local filesystem paths. The frontend (`report_site/assets/`)
-uses a dark theme by default (`color-scheme: dark`, no light/dark toggle).
+validation AUC and ROC curves (with a mean-AUC annotation on the ROC chart itself), and per-run
+classifier score distributions (a 30-bin signal/background density histogram, shown per seed only
+-- there is no aggregate view), but excludes raw event scores, labels, and local filesystem paths.
+The frontend (`report_site/assets/`) uses a dark theme by default (`color-scheme: dark`, no
+light/dark toggle).
+
+Each experiment also gets one circuit diagram (`data/circuits/<id>.png`, structure only -- zero
+weights and dummy inputs traced through the run's own saved circuit snapshot via `qml.draw_mpl`,
+`style="black_white_dark"`), shared across all its runs since the circuit structure doesn't vary
+per seed. Each run's `trained_model.pickle` also contributes `aux_weights` (`scale_factor`, `bias`,
+`hamiltonian_coeffs`) to a per-seed "Trained model" panel: `scale_factor`/`bias` shown as plain
+numbers, `hamiltonian_coeffs` only as the rendered Hamiltonian formula (Ĥ = Σ cᵢẐᵢ, 2 decimal
+places, plain Unicode -- no LaTeX/MathJax dependency), never as raw numbers. Both additions degrade
+silently (an "unavailable" notice or empty state, no error) for pre-existing runs saved before
+this feature existed.
 
 ## Submitting experiments as a detached pipeline
 
