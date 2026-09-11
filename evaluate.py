@@ -84,6 +84,7 @@ def main(config_path: str) -> dict[str, object]:
         normalize_pt=cfg.norm_pt,
         logger=logger,
         seed=random_seed if random_seed is not None else 0,
+        batch_size=cfg.batch_size,
     )
 
     costs, scores, labels = VQC.run_inference(test_loader, loss_fn=cost_fn, loss_type=cfg.loss)
