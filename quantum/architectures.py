@@ -378,23 +378,32 @@ class QuantumClassifier:
         print('Current weights: \n\n', self.current_weights)
     
     def run_inference(
-        self, 
-        dataloader: DataLoader, 
+        self,
+        dataloader: DataLoader,
         loss_fn: Callable,
         loss_type: str = 'BCE'
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         """
         Run inference on the classifier circuit using loaded weights and a dataloader.
-        
+
+        Scores each batch as the dataloader yields it (matches whatever
+        batch_size the caller configured it with). For backend='jax', the
+        forward pass is jax.jit-compiled once and reused across batches
+        sharing a shape, mirroring QuantumTrainer's training/validation steps
+        -- this is what lets inference use the GPU efficiently instead of
+        incurring per-call eager-dispatch overhead once per jet.
+
         Args:
-            dataloader: DataLoader yielding input data and labels. Inference runs
-                one jet at a time regardless of how the loader groups them.
+            dataloader: DataLoader yielding (data, labels) batches.
             loss_fn: Loss function to calculate the quantum cost (should be VQC_cost)
             loss_type: Type of loss function to use
-            
+
         Returns:
-            Tuple of (costs, scores, labels), each with shape (N_inputs,)
-            
+            Tuple of (costs, scores, labels), each with shape (N_inputs,).
+            costs holds each batch's mean loss broadcast to every jet in that
+            batch, not an exact per-jet cost -- callers only use scores/labels
+            for AUC/ROC.
+
         Raises:
             ValueError: If weights are not initialized
         """
@@ -402,31 +411,38 @@ class QuantumClassifier:
             raise ValueError(
                 'Weights not initialized. Load a model first by calling load_weights(model_path)'
             )
-        
+
+        jax_step = None
+        jax_params = None
+        if self.backend == 'jax':
+            jax_step = _make_jax_val_step(self.circuit, loss_type, loss_fn)
+            jax_params = to_jax_pytree(self.current_weights)
+
         all_costs = []
         all_scores = []
         all_labels = []
-        # Inference never needs batching: walk the loader's output jet by jet so
-        # loss_fn always sees a single sample, whatever grouping the loader uses.
         for chunk_inputs, chunk_labels in tqdm(dataloader, desc="Running inference"):
-            for i in range(len(chunk_labels)):
-                cost, score = loss_fn(
+            if self.backend == 'jax':
+                cost, scores = jax_step(jax_params, chunk_inputs, chunk_labels)
+            else:
+                cost, scores = loss_fn(
                     self.current_weights,
-                    inputs=chunk_inputs[i:i + 1],   # shape (1, n_qubits, 3)
-                    labels=chunk_labels[i:i + 1],   # shape (1,)
+                    inputs=chunk_inputs,
+                    labels=chunk_labels,
                     quantum_circuit=self.circuit,
                     return_scores=True,
-                    loss_type=loss_type
+                    loss_type=loss_type,
                 )
 
-                all_costs.append(float(cost))
-                all_scores.append(float(np.reshape(score, (-1,))[0]))
-                all_labels.append(float(chunk_labels[i]))
+            batch_size = len(chunk_labels)
+            all_costs.extend([float(cost)] * batch_size)
+            all_scores.extend(np.reshape(np.array(scores, requires_grad=False), (-1,)).tolist())
+            all_labels.extend(np.reshape(np.array(chunk_labels), (-1,)).tolist())
         # Convert to numpy arrays
         costs = np.array(all_costs)    # Shape: (N_inputs,)
         scores = np.array(all_scores)  # Shape: (N_inputs,)
         labels = np.array(all_labels)  # Shape: (N_inputs,)
-        
+
         print("Inference completed")
         return costs, scores, labels
 
