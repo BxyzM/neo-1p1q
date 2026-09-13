@@ -166,7 +166,7 @@ def main(cfg: DictConfig):
     _class_files = lambda split, sample: sorted(glob.glob(os.path.join(cfg.data_dir, split, sample, '*.h5')))
     train_sig, train_bg = _class_files(train_split, cfg.signal), _class_files(train_split, cfg.background)
     val_sig, val_bg = _class_files(val_split, cfg.signal), _class_files(val_split, cfg.background)
-    required_particles = len(VQC.auto_wires) * VQC.num_layers
+    required_particles = len(VQC.auto_wires)
     num_particles = getattr(cfg, 'num_particles', required_particles)
     if num_particles < required_particles:
         raise ValueError(
