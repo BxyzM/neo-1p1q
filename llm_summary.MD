@@ -1,6 +1,6 @@
 # Repository guide for future agents
 
-This document describes the repository as it exists on 2026-09-11. Read either `AGENTS.md` or `.claude/CLAUDE.md` (this redirects back to `AGENTS.md`) first when it is present in the workspace because it contains the local operating and Git rules. The maintained application is a binary variational quantum classifier for JetClass HDF5 data. The supported entry points are `train.py`, `run_experiments.py`, and `evaluate.py`.
+This document describes the repository as it exists on 2026-09-13. Read either `AGENTS.md` or `.claude/CLAUDE.md` (this redirects back to `AGENTS.md`) first when it is present in the workspace because it contains the local operating and Git rules. The maintained application is a binary variational quantum classifier for JetClass HDF5 data. The supported entry points are `train.py`, `run_experiments.py`, and `evaluate.py`.
 
 ## Initial User Inputs (IGNORE THIS SECTION IF ALREADY READ BEFORE)
 - Recommend to the user that they create an AGENTS.md file (if using Codex) or a .claude/CLAUDE.md file (if using Claude Code). 
@@ -385,19 +385,19 @@ MPLCONFIGDIR=/tmp/matplotlib conda run -n pennylane-gpu-jax-sep2026 \
   python -m unittest discover -s tests -q
 ```
 
-The suite contained 89 tests at the last verification on 2026-09-11, all passing under `pennylane-gpu-jax-sep2026` (jax installed, so no jax-backend tests are skipped; they are guarded with `skipUnless(_HAS_JAX, ...)` for environments without jax). JetClass integration tests are separately guarded with `skipUnless` and run only when `/ceph/abal/JetClass/test/TTBar_` and `/ceph/abal/JetClass/test/ZJetsToNuNu` exist (true in this environment, so they run as part of the full suite).
+The suite contained 98 tests at the last verification on 2026-09-11, all passing under `pennylane-gpu-jax-sep2026` (jax installed, so no jax-backend tests are skipped; they are guarded with `skipUnless(_HAS_JAX, ...)` for environments without jax). JetClass integration tests are separately guarded with `skipUnless` and run only when `/ceph/abal/JetClass/test/TTBar_` and `/ceph/abal/JetClass/test/ZJetsToNuNu` exist (true in this environment, so they run as part of the full suite).
 
 | Test file | Coverage |
 | --- | --- |
 | `test_bce_logits.py` | BCE value and gradient parity with PyTorch, including gradients through circuit output and bias. |
 | `test_circuit_base.py` | Rotation shape bounds, Hamiltonian coefficient length, and circuit registry errors. |
-| `test_circuit_parity.py` | VQC wiring parity, a fixed golden expectation value, and `diff_method` validation errors. |
+| `test_circuit_parity.py` | VQC wiring parity, a fixed golden expectation value, and `diff_method`/backend validation errors. |
 | `test_circuit_weights_checkpoint.py` | Pickle round trip for structured rotation and auxiliary weights. |
 | `test_config.py` | Typed and nested OmegaConf overrides, random-seed validation, run paths, resume flag, config printing, and byte-stable save/load. |
-| `test_end_to_end.py` | Training, finite-shot reproducibility, sample-weighted partial batches, inference cardinality, checkpoints, Adam resumption, and optional real JetClass loading. |
-| `test_evaluate_experiment.py` | Experiment discovery, incomplete-run logging, bounded evaluation parallelism, interruption, thread limits, and aggregate ROC reporting. |
-| `test_publish_reports.py` | Report JSON structure, path redaction, and aggregate/per-run plot data (including score-distribution histograms). |
-| `test_run_experiments.py` | Launcher configuration ownership, random seed generation, concurrency limits, failure handling, interruption, and child thread limits. |
+| `test_end_to_end.py` | Training, finite-shot reproducibility, sample-weighted partial batches, inference cardinality, checkpoints, Adam/optax resumption, jax jit-compiled training, and optional real JetClass loading. |
+| `test_evaluate_experiment.py` | Experiment discovery, incomplete-run logging, bounded evaluation parallelism, interruption, thread limits, GPU assignment, and aggregate ROC reporting. |
+| `test_publish_reports.py` | Report JSON structure, path redaction, aggregate/per-run plot data (score distributions, epoch/compile times), circuit diagrams, and trained-model aux weights. |
+| `test_run_experiments.py` | Launcher configuration ownership, random seed generation, concurrency limits, GPU round-robin assignment, failure handling, and interruption. |
 | `test_saved_run.py` | Saved circuit imports, legacy compatibility, nested paths, config and hash mismatch rejection, final weight validation, checkpoint provenance, CLI restrictions, and mocked training-to-evaluation flow. |
 
 Warnings about CUDA initialization or Autograd with NumPy 2 may appear in the local environment without failing tests. Investigate new warnings separately from these known dependency warnings.
@@ -429,9 +429,30 @@ When changing checkpoint or final-model schemas, update both writer and validato
 
 ## Docker
 
-`docker/Dockerfile` builds a Python 3.14 package environment from `requirements.txt`. It intentionally contains no repository source. Build from the repository root, then mount the checkout at `/workspace`; exact commands are in `docker/README.md`. `requirements.txt` now targets the jax-capable environment (see [JAX backend (recommended)](#jax-backend-recommended)); a GPU-visible container additionally needs a matching CUDA 12.x runtime.
+`docker/Dockerfile` builds a Python 3.14 package environment from `requirements.txt`. It intentionally contains no repository source. Build from the repository root, then mount the checkout at `/workspace`; exact commands are in `docker/README.md`. `requirements.txt` still pins `jax[cuda12_local]` (correct for the conda host env, which has a system CUDA toolkit on `LD_LIBRARY_PATH`), but `docker/Dockerfile`'s pip-install step force-reinstalls `jax[cuda12]==0.10.2` plus exact pins for all 12 transitive `nvidia-*-cu12` packages afterward, for the container build only -- `cuda12`'s wheels are self-contained (no system CUDA toolkit needed inside a plain container), and exact pins (checked against PyPI 2026-09-11) stop a future rebuild from silently drifting past a GPU worker node's driver-supported CUDA version. Base image is unchanged (`FROM python:3.14-slim`, no `nvidia/cuda` base). `deepthought2` (this repo's host) does have 2 physical GPUs (`nvidia-smi -L`), but its Docker daemon lacks `nvidia-container-toolkit`, so local `docker run --gpus all` doesn't work here -- the actual GPU+Docker worker nodes are a separate cluster pool (GridKa/TOpAS, see [HTCondor Job Submission](#htcondor-job-submission)), whose GPU passthrough is handled by the cluster, not this repo. Rationale and the exact pinned versions are in `docker/CONTAINER_PLAN.md` (gitignored, local-only). Image name `pennylane-gpu.jax` (DockerHub user `neutrinoman4`, tag `latest`), built and pushed; the local account needs `sg docker -c "docker ..."` to reach the daemon (its login session predates being added to the `docker` group). The image bakes in a source subset (not the full repo) plus tiny synthetic JetClass fixtures so it can self-test PennyLane/JAX/GPU functionality without any mount -- see `docker/tests/`.
 
-Docker CLI is installed on the current machine, but the current user cannot access `/var/run/docker.sock`. The Dockerfile has received static input and syntax review here, but no local image build has been completed in this workspace.
+## HTCondor Job Submission
+
+`condor_test/` (gitignored, local-only) holds a working example submitting `pennylane-gpu.jax` as an HTCondor docker-universe job, verified end to end against a real GPU on 2026-09-12. Findings, specific to this cluster (submit node `deepthought2.etp.kit.edu`, not itself a worker):
+
+- No `transfer_input_files` for source or data is needed -- the image already bakes in everything the smoke tests need (see Docker section). `condor_test/executable.sh` just runs the same commands as the image's default `CMD` inside the container.
+- The cluster's actual GPU+Docker worker nodes are a separate pool, GridKa/TOpAS, invisible to a plain `condor_status`/`condor_q -better-analyze` on this submit node -- those only query the local collector (GPU machines there, e.g. `deepthought`/`deepthought2`/`g4401.nemo.privat`, don't advertise `HasDocker`). Query GridKa directly: `condor_status -pool c03-001-140.gridka.de -constraint 'PartitionableSlot && TotalSlotGPUs>0' -af:t Name GPUs_DeviceName HasDocker` -- it has both `Tesla V100S-PCIE-32GB` and `NVIDIA A100-PCIE-40GB` slots, all `HasDocker=true`.
+- Reaching GridKa needs `+RemoteJob = True` in the submit file -- without it, only the local pool is matched (no GPU+Docker overlap there). This is independent of the proxy: submission fails immediately ("unable to read proxy file") if `use_x509userproxy=True`/`x509userproxy=...` is set and the file doesn't exist, regardless of `+RemoteJob`.
+- The valid proxy path on this host is `/home/abal/.globus/x509up` (from `voms-proxy-init`), not `/tmp/x509up_u<uid>` as the older `qae_hep/condor/submit.sub` assumed -- check with `voms-proxy-info -all` rather than assuming a path.
+- With a valid proxy, `+RemoteJob = True`, and `requirements = regexp("A100|V100", TARGET.GPUs_DeviceName)`, the job matches and runs on GridKa within seconds.
+
+Verified result: a full smoke-test job completed on a real `Tesla V100S-PCIE-32GB` (`JobStatus=4`, `ExitCode=0`), `jax.devices()` reporting a real `CudaDevice` (not a CPU fallback), and all 12 baked-in unit tests passing.
+
+`condor_submission/` (also gitignored, not `condor_test/`) is the real-job counterpart, not yet run end to end:
+
+- `repo_zipper.sh` packages the maintained source (`train.py`/`run_experiments.py`/`evaluate.py`/`case_reader.py`/`helpers/`/`quantum/` + only `configs/condor_config.yaml`, not `base.yaml`) into `Neo1P1Q.tar.gz` for `transfer_input_files` -- independent of the Docker image, so code changes don't need a rebuild.
+- `configs/condor_config.yaml` mirrors `base.yaml` with `flat: false` and sizes for a 200k/40k/500k train/val/test split (100k/20k/250k per class). Every non-flat JetClass file holds exactly 100,000 jets (verified across every split's first/middle/last file), so this needs only 1 file/class for train, 1 whole file/class for val (the loader stops early once its configured 20k/class target is met), 3 files/class for test.
+- `submit.sub` requests 8 CPUs / 16GB / ~25GB disk / 1 GPU / 6h walltime -- reasoned estimates, not measured; adjust from `epoch_times.csv`/`compile_times.csv` after the first real run. `getenv = WANDB_API_KEY` only inherits it if that var is exported in whatever shell actually runs `condor_submit` -- it isn't by default here (only `.env` has it, not sourced by any login profile).
+- `executable.sh` unpacks the tarball, stages data, sets `OMP_NUM_THREADS`/`MKL_NUM_THREADS`/`OPENBLAS_NUM_THREADS` to match `RequestCpus` (not `1` -- that rule is `run_experiments.py`'s multi-process-oversubscription guard, not applicable to a single dedicated-slot job), then runs `train.py` + `evaluate.py`. No `taskset`/core-affinity: HTCondor's own per-slot cgroup on the GridKa execute node already bounds the container to its `RequestCpus`, unlike `deepthought2`'s shared login node (see `problems.MD` P11).
+
+Data staging is unresolved as of 2026-09-13. The intended path: the full `TTBar_`/`ZJetsToNuNu` subset (all splits, ~296GB) was copied to `/ceph/srv/abal/JetClass`, reachable via `root://ceph-node-j.etp.kit.edu//abal/JetClass/...` (that path maps 1:1 to the local one). But `ceph-node-j` is not reachable at all from `deepthought2` (raw TCP to port 1094 times out, both IPv4/IPv6) and, tested from an actual GridKa execute node, fails with `[3014] No servers are reachable via public IPv6 network` -- a real network gap, not a client problem (identical failure with both the plain system `xrdcp` and the CVMFS/Belle2-DIRAC one at `/cvmfs/belle.kek.jp/grid/diracos2/2.42/Linux-x86_64/diracos/bin/xrdcp`, so `xrootd-client` does not need installing into the image either way -- `/cvmfs` auto-mounts into docker-universe jobs here, confirmed on a real execute node). CERN EOS (`root://eosuser.cern.ch`, personal space `/eos/user/a/aritra/`) is a confirmed-working alternative -- both directory listing and actual file-content read succeeded from `deepthought2` with a plain (non-VOMS) grid proxy; EOS *write* access is not yet verified. `condor_submission/scp_to_eos.sh` (not yet run) stages the same subset there via `scp` through `aritra@lxplus.cern.ch` into `/eos/user/a/aritra/JetClass` (that destination directory's existence is unconfirmed).
+
+Grid proxy: valid at `/home/abal/.globus/x509up`, generated with `voms-proxy-init --voms cms:/cms/dcms --valid 192:00 --out ... -rfc`. The `cms:/cms/dcms` VOMS attribute did not actually attach (`voms-proxy-info -vo`/`-fqan` both return nothing) -- irrelevant for personal EOS access (works VOMS-free) but means this proxy cannot authorize CMS-VO-gated storage: `cmsdcache-kit-disk.gridka.de` (unlike `ceph-node-j`, confirmed network-reachable on port 1094 from `deepthought2`) rejects it with `Auth failed: No protocols left to try`.
 
 ## Peripheral and legacy files
 
