@@ -678,11 +678,15 @@ def publish_reports(
     _copy_frontend(site_dir, output_dir)
     experiments = []
     experiment_directories = [
-        path for path in models_dir.iterdir()
-        if path.is_dir() and path.name.isdecimal()
+        path for path in models_dir.iterdir() if path.is_dir()
     ]
+    # Numeric experiment names (e.g. "001") sort newest-first by value;
+    # non-numeric names (e.g. "condor_001") sort after all numeric ones,
+    # alphabetically among themselves.
     experiment_directories.sort(
-        key=lambda path: (int(path.name), path.name), reverse=True,
+        key=lambda path: (
+            (0, -int(path.name)) if path.name.isdecimal() else (1, path.name)
+        ),
     )
     for experiment_dir in experiment_directories:
         report = build_experiment(experiment_dir, results_dir, output_dir)
