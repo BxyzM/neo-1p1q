@@ -1,0 +1,46 @@
+seed: 'base'
+random_seed: 42
+
+# JetClass data and outputs
+signal: 'TTBar_'
+background: 'ZJetsToNuNu'
+n_signal: 100000
+n_background: 100000
+n_signal_val: 20000
+n_background_val: 20000
+n_signal_test: 250000
+n_background_test: 250000
+flat: false
+norm_pt: true
+data_dir: '/ceph/abal/JetClass'
+save_dir: './saved_models'
+dump: '/ceph/abal/Neo1P1Q/results'
+
+# Circuit
+wires: 10
+num_layers: 1
+shots: -1
+backend: 'jax'
+device_name: 'default.qubit'
+diff_method: 'backprop'
+circuit_type: 'normal'
+operations_per_qubit: 3
+aux_weights:
+  scale_factor: 1.0
+  bias: 0.1
+  hamiltonian_coeffs: 0.1
+
+# Optimization
+batch_size: 100
+epochs: 25
+lr: 0.05
+improv: 0.01
+min_epochs: 3
+decay_rate: 0.5
+decay_patience: 2
+loss: 'BCE'
+
+# Run control
+save: true
+resume: false
+desc: 'Training run'
