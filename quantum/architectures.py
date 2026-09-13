@@ -318,8 +318,14 @@ class QuantumClassifier:
                 "Hamiltonian/observable coefficients such as aux_weights.hamiltonian_coeffs."
             ) from error
         # Expand before differentiation so finite-shot parameter-shift supports
-        # broadcast inputs whose encoded angles also contain trainable values.
-        self.circuit = qml.transforms.broadcast_expand(qnode)
+        # broadcast inputs whose encoded angles also contain trainable values --
+        # but only for diff_method != 'backprop'. default.qubit's own backprop
+        # path already threads a batch dimension natively (is_state_batched);
+        # applying broadcast_expand there instead splits one batched tape into
+        # batch_size separate tapes, each independently traced/compiled --
+        # confirmed via JAX_test/results.csv and JAX_study.MD to be the
+        # dominant cause of this pipeline's multi-minute jax.jit compile time.
+        self.circuit = qnode if diff_method == 'backprop' else qml.transforms.broadcast_expand(qnode)
 
     def fetch_circuit(self) -> qml.QNode:
         """
