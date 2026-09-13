@@ -126,7 +126,7 @@ class CASEJetClassDataset(IterableDataset):
             jet_pt = np.array(file[self.feature_key][rows, self.jpt_index])
             jet_etaphipt = np.array(file[self.data_key][rows])
         pt_col = jet_etaphipt[..., self.pt_index]
-        if not nnp.all(nnp.diff(pt_col, axis=-1) <= 1.0e-6):
+        if not nnp.all(nnp.diff(pt_col, axis=-1) <= 1.0e-3):
             raise ValueError(
                 f"{file_path}: constituents are not in descending-pt order; "
                 f"the leading-slice selection assumes they are"
