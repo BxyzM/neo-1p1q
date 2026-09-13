@@ -10,6 +10,8 @@ AUDIT.md
 JAX_BACKEND_PLAN.md
 EPOCH_TIMING_PLAN.md
 docker/CONTAINER_PLAN.md
+condor_test/
+condor_submission/
 auto_qml.py
 data_reader.py
 pip_install_kokkos.py
