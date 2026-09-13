@@ -37,8 +37,8 @@ const PLOT_CONFIG = {
 };
 
 document.addEventListener("DOMContentLoaded", () => {
-  if (experimentId && !/^\d+$/.test(experimentId)) {
-    renderError("Invalid experiment", "The experiment identifier must contain digits only.");
+  if (experimentId && !/^[\w-]+$/.test(experimentId)) {
+    renderError("Invalid experiment", "The experiment identifier must contain only letters, digits, underscores, or hyphens.");
     return;
   }
   loadPage();
@@ -68,7 +68,14 @@ async function loadPage() {
 
 function renderIndex(data) {
   const experiments = Array.isArray(data.experiments) ? [...data.experiments] : [];
-  experiments.sort((a, b) => Number(b.id) - Number(a.id));
+  // Numeric ids (e.g. "001") sort newest-first by value; non-numeric ids
+  // (e.g. "condor_001") sort after all numeric ones, alphabetically.
+  const sortKey = (id) => (/^\d+$/.test(id) ? [0, -Number(id), id] : [1, 0, id]);
+  experiments.sort((a, b) => {
+    const [ga, na, sa] = sortKey(a.id);
+    const [gb, nb, sb] = sortKey(b.id);
+    return ga - gb || na - nb || sa.localeCompare(sb);
+  });
   document.title = "Neo1P1Q | Experiment reports";
 
   if (!experiments.length) {
