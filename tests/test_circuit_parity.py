@@ -72,10 +72,12 @@ class TestVQCCircuitWiring(unittest.TestCase):
         Pin the exact analytic expval for this fixed seed/weights/input. Guards
         against cross-version drift in PennyLane's gate math -- default.qubit
         with shots=None is exact linear algebra, so this constant must hold on
-        any PennyLane version. Reference computed on PennyLane 0.37.0.
+        any PennyLane version. Reference computed on PennyLane 0.45.1, after
+        `VQCCircuit.encode()` switched to feature re-uploading (every layer
+        encodes the same `wires` particles, not a new block per layer).
         """
         out = float(self.qc.circuit(self.weights, self.inputs)[0])
-        self.assertAlmostEqual(out, 0.034755910654483246, places=12)
+        self.assertAlmostEqual(out, -0.0335962117376314, places=12)
 
 
 class TestSetCircuitDiffMethodValidation(unittest.TestCase):
@@ -129,7 +131,7 @@ class TestJaxBackendParity(unittest.TestCase):
         self.golden_inputs = np.array(
             onp.random.uniform(-1, 1, size=(1, self.n_qubits * self.num_layers, 3))
         )
-        self.golden_value = 0.034755910654483246  # same constant TestVQCCircuitWiring pins
+        self.golden_value = -0.0335962117376314  # same constant TestVQCCircuitWiring pins
 
     def _jax_classifier(self) -> arch.QuantumClassifier:
         qc = arch.QuantumClassifier(
