@@ -68,7 +68,7 @@ def main(config_path: str) -> dict[str, object]:
         )
     logger.info(f"Test set: {cfg.n_signal_test} '{cfg.signal}' + {cfg.n_background_test} '{cfg.background}' jets from {test_split}/")
 
-    required_particles = len(VQC.auto_wires) * VQC.num_layers
+    required_particles = len(VQC.auto_wires)
     num_particles = getattr(cfg, 'num_particles', required_particles)
     if num_particles < required_particles:
         raise ValueError(
