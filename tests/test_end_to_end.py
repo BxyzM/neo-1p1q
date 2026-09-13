@@ -33,7 +33,7 @@ try:
 except ImportError:
     _HAS_JAX = False
 
-_JETCLASS_DIR = '/ceph/abal/JetClass'
+_JETCLASS_DIR = os.environ.get('JETCLASS_DIR', '/ceph/abal/JetClass')
 
 
 class _FixedBatches:
