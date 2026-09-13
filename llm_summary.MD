@@ -142,7 +142,7 @@ With `norm_pt=false`, fixed assumed ranges are mapped to the circuit ranges:
 
 Values are scaled but not clipped. With `norm_pt=true`, constituent pt is divided by jet pt while eta and phi still use fixed scaling.
 
-The circuit needs `wires * num_layers` particles because every layer encodes a new group of particles. `num_particles` is an optional OmegaConf override. It defaults to that product and cannot be smaller.
+The circuit needs `wires` particles -- every layer feature-re-uploads the same particles (not a new group per layer). `num_particles` is an optional OmegaConf override. It defaults to `wires` and cannot be smaller.
 
 Training, validation, and evaluation all use the configured `batch_size` -- `evaluate.py` passes it explicitly to the test loader. `run_inference()` scores each batch as one call (jitted for `backend='jax'`, mirroring `QuantumTrainer`'s train/val steps), not jet by jet; `costs` in its return value holds each batch's mean loss broadcast to every jet in that batch, since nothing downstream reads per-jet cost (only `scores`/`labels`, for AUC/ROC).
 
@@ -240,7 +240,7 @@ It calls `measure()` after the final layer. `measure_override` is retained as an
 
 For the maintained `VQCCircuit`:
 
-- Layer `l` and wire `w` consume particle `w + l * n_wires`.
+- Feature re-uploading: every layer `l` and wire `w` consumes the same particle `w`, regardless of `l`.
 - Encoding applies `RY(scale * pt * eta)` and `RX(scale * pt * phi)`.
 - The trainable scale is `2 * pi * sigmoid(aux_weights.scale_factor) + 1`.
 - Entanglement is a CNOT ring from each wire to the next, with the last wire connected to wire 0.
