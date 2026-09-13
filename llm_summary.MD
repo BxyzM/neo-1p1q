@@ -127,7 +127,7 @@ Each HDF5 file must contain:
 
 1. Sorts the signal and background file lists.
 2. Reads only the leading rows still needed to reach each requested class count.
-3. Verifies that particle transverse momenta are in descending order for every loaded jet.
+3. Verifies that particle transverse momenta are in descending order for every loaded jet (tolerance `1e-3`, loosened from `1e-6` after a real JetClass file -- `train/TTBar_/TTBar_000.h5`, jet index 60292 -- turned out to have two constituents `2.4e-6` out of strict order; confirmed a genuine data quirk, not corruption, via identical checksums across the original, `/ceph/srv`-staged, and EOS copies. Only surfaces when reading deep enough into a file -- `n_signal=50000` never hit it, `n_signal=100000` (condor configs) does).
 4. Keeps the leading `num_particles` constituents.
 5. Scales the features.
 6. Concatenates signal and background and shuffles them with NumPy RNG seed 0 unless a different loader seed is passed directly.
@@ -184,7 +184,7 @@ It rejects training overrides and ambiguous sources. When `--model-dir` is omitt
 
 `--gpu-id` (default `0`, also `--experiment-dir`-only) mirrors `run_experiments.py`'s flag: `evaluate.py:_start_evaluation()` reads each run's own saved `backend` from its `config.yaml` and, only for `jax`, sets `CUDA_VISIBLE_DEVICES`/`XLA_PYTHON_CLIENT_PREALLOCATE=false` before launching that subprocess, with GPUs assigned round-robin across concurrently launched evaluations -- the same treatment `run_experiments.py` applies to training, added separately since evaluation's subprocess launcher never inherited it originally.
 
-Publish every numeric experiment as a static interactive report with:
+Publish every experiment (numeric seed names like `001`, or any other string like `condor_001`) as a static interactive report with:
 
 ```bash
 python publish_reports.py --models-dir saved_models --results-dir results \
@@ -197,7 +197,9 @@ validation AUC and ROC curves (with a mean-AUC annotation on the ROC chart itsel
 classifier score distributions (a 30-bin signal/background density histogram, shown per seed only
 -- there is no aggregate view), but excludes raw event scores, labels, and local filesystem paths.
 The frontend (`report_site/assets/`) uses a dark theme by default (`color-scheme: dark`, no
-light/dark toggle).
+light/dark toggle). Experiment discovery (`publish_reports.py`) and the frontend's own id
+validation/sort (`report_site/assets/app.js`) both accept any directory/id name, not just numeric
+ones -- numeric ids still sort newest-first by value, non-numeric ones sort after, alphabetically.
 
 Each experiment also gets one circuit diagram (`data/circuits/<id>.png`, structure only -- zero
 weights and dummy inputs traced through the run's own saved circuit snapshot via `qml.draw_mpl`,
@@ -433,26 +435,103 @@ When changing checkpoint or final-model schemas, update both writer and validato
 
 ## HTCondor Job Submission
 
-`condor_test/` (gitignored, local-only) holds a working example submitting `pennylane-gpu.jax` as an HTCondor docker-universe job, verified end to end against a real GPU on 2026-09-12. Findings, specific to this cluster (submit node `deepthought2.etp.kit.edu`, not itself a worker):
+All of `condor_test/`, `condor_submission/`, and `condor_submission/separate_jobs/` are gitignored,
+local-only. Submit node is `deepthought2.etp.kit.edu` (not itself a worker); the actual GPU+Docker
+pool is a separate cluster, GridKa/TOpAS, invisible to a plain `condor_status`/`condor_q
+-better-analyze` on this submit node (those only query the local collector, ~13 non-GPU slots --
+always reports "no match" regardless of real remote matchability). Query GridKa directly:
+`condor_status -pool c03-001-140.gridka.de -constraint 'PartitionableSlot && TotalSlotGPUs>0'
+-af:t Machine GPUs_DeviceName Cpus Memory GPUs`, **deduplicated by `Machine`** -- each host reports
+several identical rows (redundant partitionable-slot definitions, same Total/free values repeated),
+not one row per extra GPU. Snapshot on 2026-09-13 (a constantly-changing live number, not a fixed
+fact): 5 GPU-bearing Docker-capable nodes, 40 GPUs total -- `c03-001-155`/`c03-001-159` (8x
+`Tesla V100S-PCIE-32GB` each) and `c03-001-167`/`175`/`179` (8x `NVIDIA A100-PCIE-40GB` each).
+Single-GPU requests matched within ~5 min every time tried; a 2-GPU request took much longer/never
+matched, since far fewer nodes have 2+ GPUs *and* enough free CPU/memory free simultaneously.
+`condor_userprio -pool c03-001-140.gridka.de -allusers` shows this account's fairshare priority
+under `accounting_group = cms.higgs` if a long match delay needs explaining. `condor_history` can
+hang on this schedd's large history file -- prefer `condor_q -af ...`, or give `condor_history` an
+explicit `timeout`/run it in the background.
 
-- No `transfer_input_files` for source or data is needed -- the image already bakes in everything the smoke tests need (see Docker section). `condor_test/executable.sh` just runs the same commands as the image's default `CMD` inside the container.
-- The cluster's actual GPU+Docker worker nodes are a separate pool, GridKa/TOpAS, invisible to a plain `condor_status`/`condor_q -better-analyze` on this submit node -- those only query the local collector (GPU machines there, e.g. `deepthought`/`deepthought2`/`g4401.nemo.privat`, don't advertise `HasDocker`). Query GridKa directly: `condor_status -pool c03-001-140.gridka.de -constraint 'PartitionableSlot && TotalSlotGPUs>0' -af:t Name GPUs_DeviceName HasDocker` -- it has both `Tesla V100S-PCIE-32GB` and `NVIDIA A100-PCIE-40GB` slots, all `HasDocker=true`.
-- Reaching GridKa needs `+RemoteJob = True` in the submit file -- without it, only the local pool is matched (no GPU+Docker overlap there). This is independent of the proxy: submission fails immediately ("unable to read proxy file") if `use_x509userproxy=True`/`x509userproxy=...` is set and the file doesn't exist, regardless of `+RemoteJob`.
-- The valid proxy path on this host is `/home/abal/.globus/x509up` (from `voms-proxy-init`), not `/tmp/x509up_u<uid>` as the older `qae_hep/condor/submit.sub` assumed -- check with `voms-proxy-info -all` rather than assuming a path.
-- With a valid proxy, `+RemoteJob = True`, and `requirements = regexp("A100|V100", TARGET.GPUs_DeviceName)`, the job matches and runs on GridKa within seconds.
+Reaching GridKa needs `+RemoteJob = True` (without it only the local, non-GPU pool is matched) and a
+valid proxy: `/home/abal/.globus/x509up` (from `voms-proxy-init`), not `/tmp/x509up_u<uid>` as the
+older `qae_hep/condor/submit.sub` assumed. `voms-proxy-init --voms cms:/cms/dcms ...` did not
+actually attach the VOMS attribute (irrelevant for personal EOS access, which works VOMS-free, but
+means this proxy can't authorize CMS-VO-gated storage like `cmsdcache-kit-disk.gridka.de`). With a
+valid proxy, `+RemoteJob = True`, and `requirements = regexp("A100|V100", TARGET.GPUs_DeviceName)`,
+jobs match and run on GridKa reliably. `condor_test/` holds the original smoke-test job (verified
+2026-09-12: image's own baked-in unit tests + `jax.devices()` reporting a real `CudaDevice`, no
+source/data transfer needed since the image self-contains everything for that test).
 
-Verified result: a full smoke-test job completed on a real `Tesla V100S-PCIE-32GB` (`JobStatus=4`, `ExitCode=0`), `jax.devices()` reporting a real `CudaDevice` (not a CPU fallback), and all 12 baked-in unit tests passing.
+Data staging: `condor_submission/copy-eos.sh` (`xrdcp`) stages the fixed 10-file JetClass subset
+(1 file/class train, 1 whole file/class val, 3 files/class test -- exact sorted-first filenames on
+`/ceph/srv/abal/JetClass`, not guessed) to CERN EOS, `/eos/user/a/aritra/JetClass/...` --
+confirmed working, checksums identical to the originals. The original plan, `root://ceph-node-j
+.etp.kit.edu`, is abandoned: unreachable from both `deepthought2` and a real GridKa execute node
+(`[3014] No servers are reachable via public IPv6 network`, a real network gap). Inside a job,
+`executable.sh` pulls the same 10 files back down from EOS via the CVMFS Belle2-DIRAC `xrdcp`
+(`BELLE2_EXEC=/cvmfs/belle.kek.jp/grid/diracos2/2.42/Linux-x86_64/diracos/bin`, auto-mounted, no
+Dockerfile change needed) -- this also needs `X509_CERT_DIR`/`X509_VOMS_DIR`/`X509_VOMSES` exported
+to `/cvmfs/grid.cern.ch/etc/grid-security/...` (baked as image `ENV` vars in `qae_hep`'s
+Dockerfiles; this repo's `docker/Dockerfile` doesn't, so `executable.sh` exports them itself).
+Output (`saved_models/`, `results/`, never the staged `data/`) is pushed back to EOS the same way
+(`xrdfs ... mkdir -p` + `xrdcp -rf`; confirmed this creates the full remote directory tree from
+scratch, no pre-existing destination needed). `submit.sub` sets `transfer_output_files = ""` to
+suppress HTCondor's own default output-transfer-back deliberately -- **investigated as an
+alternative/supplement to the EOS copy and ruled out**: HTCondor's `transfer_output_remaps` cannot
+remap directories at all ("You cannot specify directories to be remapped" -- HTCondor JDL
+reference), only individual files, so a whole run's output tree can't land at its local-equivalent
+path this way (a tar/untar workaround would work mechanically but adds a step for no clear benefit,
+and how this behaves for a `+RemoteJob`-flocked job specifically is undocumented either way).
 
-`condor_submission/` (also gitignored, not `condor_test/`) is the real-job counterpart, not yet run end to end:
+Two working job designs, both under `condor_submission/`, sharing one `repo_zipper.sh`-built
+`Neo1P1Q.tar.gz` (`train.py`/`run_experiments.py`/`evaluate.py`/`case_reader.py`/`helpers/`/
+`quantum/` + `configs/condor_config.yaml`, independent of the Docker image) and one
+`configs/condor_config.yaml` (mirrors `base.yaml`, `flat: false`, 200k/40k/500k train/val/test
+jets -- every non-flat JetClass file holds exactly 100,000 jets, verified, so this needs only 1
+file/class train, 1 whole file/class val, 3 files/class test):
 
-- `repo_zipper.sh` packages the maintained source (`train.py`/`run_experiments.py`/`evaluate.py`/`case_reader.py`/`helpers/`/`quantum/` + only `configs/condor_config.yaml`, not `base.yaml`) into `Neo1P1Q.tar.gz` for `transfer_input_files` -- independent of the Docker image, so code changes don't need a rebuild.
-- `configs/condor_config.yaml` mirrors `base.yaml` with `flat: false` and sizes for a 200k/40k/500k train/val/test split (100k/20k/250k per class). Every non-flat JetClass file holds exactly 100,000 jets (verified across every split's first/middle/last file), so this needs only 1 file/class for train, 1 whole file/class for val (the loader stops early once its configured 20k/class target is met), 3 files/class for test.
-- `submit.sub` requests 8 CPUs / 16GB / ~25GB disk / 1 GPU / 6h walltime -- reasoned estimates, not measured; adjust from `epoch_times.csv`/`compile_times.csv` after the first real run. `getenv = WANDB_API_KEY` only inherits it if that var is exported in whatever shell actually runs `condor_submit` -- it isn't by default here (only `.env` has it, not sourced by any login profile).
-- `executable.sh` unpacks the tarball, stages data, sets `OMP_NUM_THREADS`/`MKL_NUM_THREADS`/`OPENBLAS_NUM_THREADS` to match `RequestCpus` (not `1` -- that rule is `run_experiments.py`'s multi-process-oversubscription guard, not applicable to a single dedicated-slot job), then runs `train.py` + `evaluate.py`. No `taskset`/core-affinity: HTCondor's own per-slot cgroup on the GridKa execute node already bounds the container to its `RequestCpus`, unlike `deepthought2`'s shared login node (see `problems.MD` P11).
+- **`submit.sub`/`executable.sh`** (experiment `condor_001`): one job runs `run_experiments.py
+  --number-of-runs 5 --num-processes 5 --gpu-id 0` (5 concurrent runs sharing 1 GPU), then
+  `evaluate.py --experiment-dir`. Verified end to end (cluster 1859886): AUC 0.9152 +/- 0.0002,
+  early-stopped at 5/25 epochs, `saved_models/condor_001/`+`results/condor_001/` all landed on EOS.
+  `RequestMemory` had to be raised from an initial 16000 to 65536 -- 5 concurrent jax processes (each
+  independently loading its own full train+val split plus its own CUDA context) OOM'd at 16000
+  (`HoldReason`/`LastHoldReason`: "Docker job has gone over memory limit of 16000 Mb"; 3 processes
+  SIGKILL, 2 SIGABRT collateral). HTCondor's own periodic `MemoryUsage`/`ResidentSetSize` sampling on
+  the held job was stale/near-zero -- too infrequent to catch the actual OOM-triggering peak; the
+  cgroup kill message was the only reliable signal. Separately, steady-state per-process batch
+  throughput under 5-way GPU sharing was barely different from a single unshared process (~3
+  batches/sec each either way), but the one-time JIT compile step (CPU-bound `nvptx`/`ptxas` AOT
+  compilation -- not capped by `run_experiments.py`'s `SINGLE_THREAD_ENV`, which only bounds BLAS
+  threads, not XLA's own compiler threads) took ~17-18 min per process under 5-way CPU contention vs.
+  an estimated ~9.7 min unshared (backed out of `saved_models/001`'s `epoch_times.csv`) -- a real
+  ~2x compile-phase slowdown from CPU contention, not a GPU-compute effect. A 2-GPU variant of this
+  same design (`--gpu-id 0,1`, `request_GPUs=2`) repeatedly struggled to match at all (far fewer
+  qualifying GridKa nodes than a 1-GPU request) and was abandoned in favor of the design below.
+- **`separate_jobs/`** (experiment `condor_002`): one `train.py` + single-run `evaluate.py --seed
+  --random-seed --model-dir` call **per job** instead of `run_experiments.py` -- avoids the
+  multi-GPU-matching difficulty entirely, since each job needs only 1 GPU (matches in ~5 min, like
+  `condor_001`). `evaluate.py` needed zero code changes: its `--seed`/`--random-seed`/`--model-dir`
+  mode already resolves to exactly `<model_dir>/<seed>/<random_seed>/config.yaml`
+  (`helpers/config.py:147-198`); `--num-cores`/`--gpu-id` are `--experiment-dir`-only and must be
+  omitted. `generate_seeds.sh` writes 5 fresh, distinct, non-negative random seeds to `seeds.txt` on
+  every call (bash `(RANDOM<<16)|RANDOM`, well under the `random_seed < 2**31` contract) -- never a
+  committed list; `submit.sub` uses `queue seed from seeds.txt` + `arguments = $(seed)` (same
+  `queue ... from <file>` pattern as `qae_hep/condor/submit.sub`'s `queue trash, qubit from
+  qubits.txt`); `submit_jobs.sh` wraps seed generation + `.env` sourcing (for `WANDB_API_KEY`) +
+  `condor_submit`. Sized at 2 CPUs / 16GB / 1 GPU per job (deliberately tight -- one small-circuit
+  process, no concurrent siblings to budget CPU/memory contention for; `OMP/MKL/OPENBLAS_NUM_THREADS`
+  explicitly capped to 2 to match). EOS copy-back is scoped to just that job's own
+  `<seed>/<random_seed>` leaf directory, so concurrent jobs never collide on the shared parent.
 
-Data staging is unresolved as of 2026-09-13. The intended path: the full `TTBar_`/`ZJetsToNuNu` subset (all splits, ~296GB) was copied to `/ceph/srv/abal/JetClass`, reachable via `root://ceph-node-j.etp.kit.edu//abal/JetClass/...` (that path maps 1:1 to the local one). But `ceph-node-j` is not reachable at all from `deepthought2` (raw TCP to port 1094 times out, both IPv4/IPv6) and, tested from an actual GridKa execute node, fails with `[3014] No servers are reachable via public IPv6 network` -- a real network gap, not a client problem (identical failure with both the plain system `xrdcp` and the CVMFS/Belle2-DIRAC one at `/cvmfs/belle.kek.jp/grid/diracos2/2.42/Linux-x86_64/diracos/bin/xrdcp`, so `xrootd-client` does not need installing into the image either way -- `/cvmfs` auto-mounts into docker-universe jobs here, confirmed on a real execute node). CERN EOS (`root://eosuser.cern.ch`, personal space `/eos/user/a/aritra/`) is a confirmed-working alternative -- both directory listing and actual file-content read succeeded from `deepthought2` with a plain (non-VOMS) grid proxy; EOS *write* access is not yet verified. `condor_submission/scp_to_eos.sh` (not yet run) stages the same subset there via `scp` through `aritra@lxplus.cern.ch` into `/eos/user/a/aritra/JetClass` (that destination directory's existence is unconfirmed).
-
-Grid proxy: valid at `/home/abal/.globus/x509up`, generated with `voms-proxy-init --voms cms:/cms/dcms --valid 192:00 --out ... -rfc`. The `cms:/cms/dcms` VOMS attribute did not actually attach (`voms-proxy-info -vo`/`-fqan` both return nothing) -- irrelevant for personal EOS access (works VOMS-free) but means this proxy cannot authorize CMS-VO-gated storage: `cmsdcache-kit-disk.gridka.de` (unlike `ceph-node-j`, confirmed network-reachable on port 1094 from `deepthought2`) rejects it with `Auth failed: No protocols left to try`.
+WandB: `docker/Dockerfile` bakes `WANDB_MODE=offline`; both job designs `export WANDB_MODE=online`
+in `executable.sh` (`train.py`'s `wandb.init()` has no `mode=` kwarg, purely env-var-driven) --
+needs `WANDB_API_KEY` sourced from `.env` into the shell that actually runs `condor_submit`
+(`getenv = WANDB_API_KEY` only inherits what that shell already has exported; it isn't by default).
+Crashed/failed runs from failed job attempts are cleaned up via `wandb.Api()`'s `Run.delete()`,
+matched by run name prefix (`wandb.init(name=f"{seed}_{random_seed}", ...)`) and confirmed `state`
+before deleting, not guessed.
 
 ## Peripheral and legacy files
 
