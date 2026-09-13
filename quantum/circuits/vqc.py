@@ -52,7 +52,7 @@ class VQCCircuit(CircuitBase):
         n_wires = len(wires)
         sf = 2 * np.pi * sigmoid(weights.aux['scale_factor']) + 1
         for w in wires:
-            particle = w + layer * n_wires
+            particle = w
             zenith = inputs[:, particle, self.index['eta']]
             azimuth = inputs[:, particle, self.index['phi']]
             radius = inputs[:, particle, self.index['pt']]
