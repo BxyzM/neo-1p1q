@@ -626,6 +626,7 @@ def _index_entry(report: dict[str, Any]) -> dict[str, Any]:
     """Reduce an experiment report to the fields shown on its index card."""
     summary = report["summary"]
     model = report["config"]["model"]
+    data_cfg = report["config"]["data"]
     optimization = report["config"]["optimization"]
     return {
         "id": report["experiment"]["id"],
@@ -638,6 +639,9 @@ def _index_entry(report: dict[str, Any]) -> dict[str, Any]:
         "loss": optimization.get("loss"),
         "qubits": model.get("wires"),
         "layers": model.get("num_layers"),
+        "circuit_type": model.get("circuit_type"),
+        "operations_per_qubit": model.get("operations_per_qubit"),
+        "train_n": data_cfg.get("training_jets"),
         "notices": report["notices"],
     }
 

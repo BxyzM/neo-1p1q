@@ -7,7 +7,9 @@
  * Data contract:
  *   data/index.json lists experiment summaries under `experiments`; each item
  *   has id, status, run_count, successful_runs, mean_auc, std_auc, total_jets,
- *   loss, device, and mode.
+ *   loss, qubits, layers, circuit_type, operations_per_qubit, and train_n. The
+ *   `?view=sweep` page groups these by every field except one swept parameter
+ *   (see SWEEP_PARAMS) to plot mean AUC vs that parameter.
  *   data/<id>.json provides `summary`, `validation`, `roc`, `epoch_times`,
  *   `compile_times`, `circuit_diagram`, `score_distribution`, `runs`, `config`, and `notices`.
  *   Missing values are displayed rather than inferred. `score_distribution.runs` is shown per seed
@@ -24,10 +26,22 @@
 const app = document.querySelector("#app");
 const params = new URLSearchParams(window.location.search);
 const experimentId = params.get("experiment");
+const view = params.get("view");
 const COLORS = [
   "#7fdb95", "#e0916a", "#7fb1e0", "#c295cc", "#e0c15c",
   "#5cc9c2", "#e0a394", "#a8c96f", "#b3a3e0", "#e08aa0",
 ];
+
+// Sweep parameters a user can hold as the single varying axis. `field` is the
+// index.json key; the other two, plus `operations_per_qubit`, are held fixed
+// to identify a comparable set of experiments (circuit_type is never fixed --
+// it is the color/series dimension instead, for a future second circuit type).
+const SWEEP_PARAMS = [
+  { key: "layers", label: "Layers", field: "layers", axisTitle: "Number of layers" },
+  { key: "qubits", label: "Qubits", field: "qubits", axisTitle: "Number of qubits" },
+  { key: "train_n", label: "Training jets", field: "train_n", axisTitle: "Training jets (signal + background)" },
+];
+const FIXED_FIELDS = ["operations_per_qubit"];
 
 const PLOT_CONFIG = {
   responsive: true,
@@ -54,6 +68,8 @@ async function loadPage() {
     const data = await response.json();
     if (experimentId) {
       renderReport(data);
+    } else if (view === "sweep") {
+      renderSweepPage(data);
     } else {
       renderIndex(data);
     }
@@ -94,6 +110,7 @@ function renderIndex(data) {
       <h1>Experiment reports</h1>
       <p class="lede">Training and inference results across reproducible random-seed ensembles.</p>
       <span class="report-count">${plural(experiments.length, "experiment")} available</span>
+      <a class="button-link" href="?view=sweep">Parameter sweep &#8594;</a>
     </header>
     <section class="experiment-grid" aria-label="Experiments">
       ${experiments.map(experimentCard).join("")}
@@ -121,6 +138,218 @@ function experimentCard(experiment) {
       </div>
       <span class="card-arrow" aria-hidden="true">&#8594;</span>
     </a>`;
+}
+
+function renderSweepPage(data) {
+  const experiments = Array.isArray(data.experiments) ? data.experiments : [];
+  document.title = "Neo1P1Q | Parameter sweep";
+  const requested = params.get("param");
+  const initialParam = SWEEP_PARAMS.some((entry) => entry.key === requested) ? requested : SWEEP_PARAMS[0].key;
+
+  app.innerHTML = `
+    <a class="back-link" href="./"><span aria-hidden="true">&#8592;</span> All experiments</a>
+    <header>
+      <p class="eyebrow">Quantum classifier study</p>
+      <h1>Parameter sweep</h1>
+      <p class="lede">Mean test AUC across experiments that vary exactly one architecture parameter, with every other reported setting held fixed.</p>
+    </header>
+    <section class="report-section" aria-labelledby="sweep-title">
+      <div class="chart-toolbar">
+        <strong id="sweep-title">Swept parameter</strong>
+        <div class="segmented" id="sweep-param-selector" role="group" aria-label="Sweep parameter">
+          ${SWEEP_PARAMS.map((entry) => `
+            <button type="button" data-param="${entry.key}" aria-pressed="${entry.key === initialParam}">${safeText(entry.label)}</button>
+          `).join("")}
+        </div>
+      </div>
+      <div class="chart" id="sweep-chart" role="img" aria-label="Parameter sweep plot"></div>
+      <div id="sweep-summary"></div>
+    </section>`;
+
+  renderSweep(experiments, initialParam);
+  const buttons = [...document.querySelectorAll("#sweep-param-selector button")];
+  buttons.forEach((button) => {
+    button.addEventListener("click", () => {
+      buttons.forEach((item) => item.setAttribute("aria-pressed", String(item === button)));
+      const url = new URL(window.location.href);
+      url.searchParams.set("view", "sweep");
+      url.searchParams.set("param", button.dataset.param);
+      history.replaceState(null, "", url);
+      renderSweep(experiments, button.dataset.param);
+    });
+  });
+}
+
+function renderSweep(experiments, paramKey) {
+  const paramInfo = SWEEP_PARAMS.find((entry) => entry.key === paramKey) ?? SWEEP_PARAMS[0];
+  const model = buildSweepModel(experiments, paramInfo.field);
+  renderSweepChart(model, paramInfo);
+  renderSweepSummaryPanel(model, paramInfo);
+}
+
+// Groups experiments by every reported architecture field except the swept
+// one (plus the always-fixed fields), picks the largest such group as "the"
+// comparable sweep, and classifies every value the swept field takes on
+// anywhere in the dataset as present / failed / missing within that group.
+function buildSweepModel(experiments, sweptField) {
+  const contextFields = SWEEP_PARAMS.map((entry) => entry.field).filter((field) => field !== sweptField).concat(FIXED_FIELDS);
+  const usable = experiments.filter((experiment) => (
+    numeric(experiment[sweptField]) !== null && contextFields.every((field) => numeric(experiment[field]) !== null)
+  ));
+  const excluded = experiments.filter((experiment) => !usable.includes(experiment));
+
+  if (!usable.length) {
+    return { empty: true, contextFields, excluded, candidateValues: [], series: [], context: null };
+  }
+
+  const contextKey = (experiment) => contextFields.map((field) => experiment[field]).join("|");
+  const groups = new Map();
+  for (const experiment of usable) {
+    const key = contextKey(experiment);
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(experiment);
+  }
+
+  let activeKey = null;
+  let activeGroup = [];
+  for (const [key, members] of groups) {
+    const distinct = new Set(members.map((experiment) => experiment[sweptField])).size;
+    const bestDistinct = new Set(activeGroup.map((experiment) => experiment[sweptField])).size;
+    if (
+      distinct > bestDistinct ||
+      (distinct === bestDistinct && members.length > activeGroup.length) ||
+      (distinct === bestDistinct && members.length === activeGroup.length && (activeKey === null || key < activeKey))
+    ) {
+      activeKey = key;
+      activeGroup = members;
+    }
+  }
+
+  const candidateValues = [...new Set(usable.map((experiment) => Number(experiment[sweptField])))].sort((a, b) => a - b);
+  const circuitTypes = [...new Set(activeGroup.map((experiment) => experiment.circuit_type ?? "normal"))].sort();
+  const context = Object.fromEntries(contextFields.map((field) => [field, activeGroup[0]?.[field] ?? null]));
+
+  const series = circuitTypes.map((circuitType, index) => {
+    const members = activeGroup.filter((experiment) => (experiment.circuit_type ?? "normal") === circuitType);
+    const byValue = new Map();
+    for (const experiment of members) {
+      const value = Number(experiment[sweptField]);
+      if (!byValue.has(value)) byValue.set(value, []);
+      byValue.get(value).push(experiment);
+    }
+    const points = candidateValues.map((value) => {
+      const matches = byValue.get(value) ?? [];
+      if (!matches.length) return { value, state: "missing" };
+      const chosen = [...matches].sort((a, b) => (numeric(b.successful_runs) ?? -1) - (numeric(a.successful_runs) ?? -1))[0];
+      const auc = numeric(chosen.mean_auc);
+      return {
+        value,
+        state: auc === null ? "failed" : "ok",
+        experiment: chosen,
+        duplicates: matches.length > 1 ? matches.map((m) => m.id) : null,
+      };
+    });
+    return { circuitType, color: COLORS[index % COLORS.length], points };
+  });
+
+  return { empty: false, contextFields, excluded, candidateValues, series, context, paramField: sweptField };
+}
+
+function renderSweepChart(model, paramInfo) {
+  const target = document.querySelector("#sweep-chart");
+  if (!window.Plotly) {
+    renderChartError(target, "Plotly could not be loaded.");
+    return;
+  }
+  if (model.empty || !model.candidateValues.length) {
+    renderChartError(target, "No experiments have enough reported configuration data to build this sweep.");
+    return;
+  }
+
+  const traces = model.series.map((series) => {
+    const okPoints = series.points.filter((point) => point.state === "ok");
+    return {
+      x: series.points.map((point) => point.value),
+      y: series.points.map((point) => (point.state === "ok" ? point.experiment.mean_auc : null)),
+      error_y: {
+        type: "data",
+        array: series.points.map((point) => (point.state === "ok" ? (numeric(point.experiment.std_auc) ?? 0) : 0)),
+        color: `${series.color}88`,
+        thickness: 1.2,
+        width: 4,
+        visible: true,
+      },
+      type: "scatter",
+      mode: "lines+markers",
+      name: model.series.length > 1 ? series.circuitType : "Mean test AUC",
+      connectgaps: false,
+      line: { color: series.color, width: 2 },
+      marker: {
+        color: series.color,
+        size: 9,
+        symbol: series.points.map((point) => (
+          point.state === "ok" && numeric(point.experiment.successful_runs) < numeric(point.experiment.run_count)
+            ? "circle-open"
+            : "circle"
+        )),
+      },
+      customdata: series.points.map((point) => [
+        point.state === "ok" ? point.experiment.id : "",
+        point.state === "ok" ? `${point.experiment.successful_runs}/${point.experiment.run_count}` : "",
+      ]),
+      hovertemplate: `${safeText(paramInfo.axisTitle)} %{x}<br>Mean AUC %{y:.4f}<br>Experiment %{customdata[0]}<br>Runs %{customdata[1]}<extra></extra>`,
+      hoverinfo: okPoints.length ? "all" : "skip",
+    };
+  });
+
+  drawPlot(target, traces, {
+    xaxis: { title: paramInfo.axisTitle, tickvals: model.candidateValues, ticktext: model.candidateValues.map((value) => value.toLocaleString("en-US")) },
+    yaxis: { title: "Mean test AUC" },
+    showlegend: model.series.length > 1,
+  }, "No experiments have enough reported configuration data to build this sweep.");
+}
+
+function renderSweepSummaryPanel(model, paramInfo) {
+  const target = document.querySelector("#sweep-summary");
+  if (!target) return;
+
+  if (model.empty) {
+    target.innerHTML = `<div class="empty-state"><p>No experiments report a complete, comparable configuration (${safeText(model.contextFields.map(titleCase).join(", "))}) to build a ${safeText(paramInfo.label.toLowerCase())} sweep.</p></div>`;
+    return;
+  }
+
+  const contextLine = model.contextFields
+    .map((field) => `${titleCase(field)} = ${safeText(displayValue(model.context[field]))}`)
+    .join(", ");
+
+  const notes = [];
+  if (model.candidateValues.length < 2) {
+    notes.push(`<li>Only one ${safeText(paramInfo.label.toLowerCase())} value (${safeText(model.candidateValues[0])}) has been run under this configuration &mdash; not enough data yet for an actual sweep.</li>`);
+  }
+  for (const series of model.series) {
+    for (const point of series.points) {
+      if (point.state === "missing") {
+        notes.push(`<li><strong>${safeText(paramInfo.label)} = ${point.value}</strong>${model.series.length > 1 ? ` (${safeText(series.circuitType)})` : ""} &mdash; no experiment found with ${safeText(contextLine)}.</li>`);
+      } else if (point.state === "failed") {
+        notes.push(`<li><strong>${safeText(paramInfo.label)} = ${point.value}</strong>${model.series.length > 1 ? ` (${safeText(series.circuitType)})` : ""} &mdash; experiment <code>${safeText(point.experiment.id)}</code> ran but has no usable test AUC (${safeText(displayValue(point.experiment.status))}, ${safeText(point.experiment.successful_runs)}/${safeText(point.experiment.run_count)} runs succeeded).</li>`);
+      } else if (point.duplicates) {
+        notes.push(`<li><strong>${safeText(paramInfo.label)} = ${point.value}</strong>${model.series.length > 1 ? ` (${safeText(series.circuitType)})` : ""} &mdash; multiple experiments match (${point.duplicates.map(safeText).join(", ")}); showing <code>${safeText(point.experiment.id)}</code>, the one with the most successful runs.</li>`);
+      }
+    }
+  }
+  if (model.excluded.length) {
+    notes.push(`<li>${plural(model.excluded.length, "experiment")} excluded from every sweep for missing configuration fields: ${model.excluded.map((experiment) => safeText(experiment.id)).join(", ")}.</li>`);
+  }
+
+  const totalPoints = model.series[0]?.points.length ?? 0;
+  const okCount = model.series.reduce((sum, series) => sum + series.points.filter((point) => point.state === "ok").length, 0);
+  const headline = totalPoints
+    ? `${okCount} of ${totalPoints * model.series.length} possible ${safeText(paramInfo.label.toLowerCase())} value${totalPoints === 1 ? "" : "s"} present, holding ${safeText(contextLine)} fixed.`
+    : "";
+
+  target.innerHTML = `
+    <p class="report-meta">${headline}</p>
+    ${notes.length ? `<aside class="notices" aria-label="Missing sweep runs"><div class="notice notice--warning"><ul class="sweep-notes">${notes.join("")}</ul></div></aside>` : ""}`;
 }
 
 function renderReport(data) {

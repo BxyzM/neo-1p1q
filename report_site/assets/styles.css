@@ -517,6 +517,14 @@ tbody tr:hover { background: rgba(127, 219, 149, 0.08); }
 .notice--warning::before { background: var(--warning); }
 .notice--error::before { background: var(--error); }
 
+.sweep-notes {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  margin: 0;
+  padding-left: 1.1rem;
+}
+
 .empty-state,
 .error-state,
 .loading-state {
