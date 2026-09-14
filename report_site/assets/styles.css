@@ -600,8 +600,9 @@ tbody tr:hover { background: rgba(127, 219, 149, 0.08); }
   #app { padding-top: 3.2rem; }
   .report-heading { display: block; }
   .report-heading .status { margin-top: 1rem; }
-  .experiment-card__top { display: block; }
-  .experiment-card__top .status { margin-top: 0.6rem; }
+  .experiment-card__number {
+    font-size: clamp(0.85rem, 1.7rem - 0.055rem * var(--id-length, 3), 2.4rem);
+  }
   .stat-grid { grid-template-columns: 1fr 1fr; }
   .stat-card { min-height: 112px; padding: 1rem; }
   .chart-toolbar { align-items: flex-start; flex-direction: column; }
