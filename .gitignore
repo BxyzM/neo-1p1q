@@ -18,6 +18,7 @@ encoding_test/
 analysis.md
 circuit_test/
 analysis_circuit.MD
+agent_context.mD
 auto_qml.py
 data_reader.py
 pip_install_kokkos.py
