@@ -625,7 +625,7 @@ def build_experiment(experiment_dir: Path, results_dir: Path, output_dir: Path) 
 def _index_entry(report: dict[str, Any]) -> dict[str, Any]:
     """Reduce an experiment report to the fields shown on its index card."""
     summary = report["summary"]
-    execution = report["config"]["execution"]
+    model = report["config"]["model"]
     optimization = report["config"]["optimization"]
     return {
         "id": report["experiment"]["id"],
@@ -636,8 +636,8 @@ def _index_entry(report: dict[str, Any]) -> dict[str, Any]:
         "mean_auc": summary["mean_auc"],
         "std_auc": summary["std_auc"],
         "loss": optimization.get("loss"),
-        "device": execution.get("device"),
-        "mode": execution.get("mode"),
+        "qubits": model.get("wires"),
+        "layers": model.get("num_layers"),
         "notices": report["notices"],
     }
 

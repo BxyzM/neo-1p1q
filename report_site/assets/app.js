@@ -108,7 +108,7 @@ function experimentCard(experiment) {
   return `
     <a class="experiment-card" href="?experiment=${encodeURIComponent(String(experiment.id))}">
       <div class="experiment-card__top">
-        <span class="experiment-card__number">${id}</span>
+        <span class="experiment-card__number" style="--id-length:${id.length}">${id}</span>
         <span class="status ${status.className}">${safeText(status.label)}</span>
       </div>
       <div class="experiment-card__metrics">
@@ -116,8 +116,8 @@ function experimentCard(experiment) {
         <span><span class="metric-label">Runs</span><span class="metric-value">${successful === null || runs === null ? "Unavailable" : `${successful} / ${runs}`}</span></span>
         <span><span class="metric-label">Evaluated jets</span><span class="metric-value">${formatInteger(experiment.total_jets)}</span></span>
         <span><span class="metric-label">Loss</span><span class="metric-value">${safeText(displayValue(experiment.loss))}</span></span>
-        <span><span class="metric-label">Device</span><span class="metric-value">${safeText(displayValue(experiment.device))}</span></span>
-        <span><span class="metric-label">Mode</span><span class="metric-value">${safeText(displayValue(experiment.mode))}</span></span>
+        <span><span class="metric-label">Qubits</span><span class="metric-value">${safeText(displayValue(experiment.qubits))}</span></span>
+        <span><span class="metric-label">Layers</span><span class="metric-value">${safeText(displayValue(experiment.layers))}</span></span>
       </div>
       <span class="card-arrow" aria-hidden="true">&#8594;</span>
     </a>`;
