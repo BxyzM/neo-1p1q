@@ -64,6 +64,10 @@ class Circuit(Protocol):
     """Names in aux_defaults that hold one independent trainable value per
     wire; resolve_aux_weights() broadcasts their scalar default/override to
     one entry per wire."""
+    aux_per_pair_names: tuple = ()
+    """Names in aux_defaults that hold one independent trainable value per
+    unordered wire pair; resolve_aux_weights() broadcasts their scalar
+    default/override to one entry per pair (n_wires * (n_wires - 1) / 2)."""
 
     def rotation_shape(self, n_qubits: int, n_layers: int) -> RotationShape:
         """(L, N, R) for this circuit's trainable rotation tensor."""
@@ -103,6 +107,7 @@ class CircuitBase:
     operations_per_qubit: int
     aux_defaults: Dict[str, float]
     aux_per_wire_names: tuple = ()
+    aux_per_pair_names: tuple = ()
 
     def rotation_shape(self, n_qubits: int, n_layers: int) -> RotationShape:
         return RotationShape(L=n_layers, N=n_qubits, R=self.operations_per_qubit)
