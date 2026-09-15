@@ -295,7 +295,9 @@ def load_training_checkpoint(
 def resolve_aux_weights(model: QuantumClassifier, aux_overrides: dict | None = None) -> dict:
     """Merge a circuit's aux defaults with overrides, broadcasting any
     circuit-declared per-wire names (see Circuit.aux_per_wire_names) from one
-    scalar to one independent value per wire.
+    scalar to one independent value per wire, and any per-pair names (see
+    Circuit.aux_per_pair_names) to one independent value per unordered wire
+    pair.
 
     Args:
         model: Classifier whose circuit implementation and wire count are used.
@@ -304,13 +306,16 @@ def resolve_aux_weights(model: QuantumClassifier, aux_overrides: dict | None = N
 
     Returns:
         Mapping of aux weight name to its resolved initial value: a scalar,
-        or a list with one entry per wire for each name in
-        ``aux_per_wire_names``.
+        a list with one entry per wire for each name in
+        ``aux_per_wire_names``, or a list with one entry per unordered wire
+        pair for each name in ``aux_per_pair_names``.
     """
     merged = {**model._impl.aux_defaults, **(aux_overrides or {})}
     n_wires = len(model.auto_wires)
     for name in model._impl.aux_per_wire_names:
         merged[name] = [merged[name]] * n_wires
+    for name in model._impl.aux_per_pair_names:
+        merged[name] = [merged[name]] * (n_wires * (n_wires - 1) // 2)
     return merged
 
 
