@@ -16,6 +16,7 @@ JAX_test/
 JAX_study.MD
 encoding_test/
 analysis.md
+configs/base_2d.yaml
 circuit_test/
 analysis_circuit.MD
 agent_context.mD
