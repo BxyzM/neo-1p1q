@@ -488,12 +488,28 @@ submitting.
   `concurrent_jobs/copy_back_and_publish.sh <experiment_name>` copies the whole
   `saved_models/<experiment>` + `results/<experiment>` EOS subtree back and republishes the
   interactive report.
-- **`condor_submission/separate_jobs/condor_00N/`** (alternative): one `train.py` + single-run
-  `evaluate.py --seed --random-seed --model-dir` call per job instead of `run_experiments.py`, each
-  needing only 1 GPU. `generate_seeds.sh` writes fresh random seeds to `seeds.txt` per submission
-  (`queue seed from seeds.txt`); `submit_jobs.sh` regenerates seeds and submits. Sized at 2 CPUs /
-  16GB / 1 GPU per job. `separate_jobs/copy_back_and_publish.sh <experiment_name> [seeds_file]`
-  copies each seed's own leaf directory back individually.
+- **`condor_submission/separate_jobs/`** (alternative to `concurrent_jobs/`): one `train.py` +
+  single-run `evaluate.py --seed --random-seed --model-dir` call per job instead of
+  `run_experiments.py`, each needing only 1 GPU. Per job, `RANDOM_SEED` is the sole executable
+  argument (`arguments = $(seed)`, `queue seed from seeds.txt`); the experiment name
+  (`EXPERIMENT_SEED`, i.e. config `seed=`) is fixed inline in that pair's `executable.sh`/header
+  comments, not queued. Sized at 2 CPUs / 16GB RequestMemory / 1 GPU / 6h walltime per job.
+  `generate_seeds.sh` writes fresh random seeds to `seeds.txt` per submission; `submit_jobs.sh`
+  regenerates seeds then runs `condor_submit`.
+  - Each new experiment gets its own `condor_00N/` subdirectory (mirroring `concurrent_jobs/`): copy
+    `executable.sh`/`submit.sub`/`generate_seeds.sh`/`submit_jobs.sh` in and update
+    `EXPERIMENT_SEED`/header comments/`submit.sub`'s title to the new name; running
+    `submit_jobs.sh` from inside that directory generates its own `seeds.txt` and writes `logs/`
+    relative to it. `condor_003/` currently exists in this form but is unsubmitted (no `seeds.txt`,
+    empty `logs/`).
+  - `condor_002` (the first separate-jobs experiment, completed) predates this per-directory
+    convention: its `executable.sh`/`submit.sub`/`generate_seeds.sh`/`submit_jobs.sh`/`seeds.txt`
+    sit directly at `separate_jobs/`'s top level instead of in a subdirectory of their own.
+  - `separate_jobs/copy_back_and_publish.sh <experiment_name> [seeds_file]` is shared (not
+    duplicated per subdirectory) and copies each seed's own leaf directory back individually;
+    `seeds_file` defaults to `seeds.txt` next to the script, so a subdirectory-style experiment
+    must pass its own path explicitly (e.g. `copy_back_and_publish.sh condor_003
+    condor_003/seeds.txt`).
 - **`condor_submission/executable.sh`/`submit.sub`** (top level): the original `run_experiments.py`
   design that `concurrent_jobs/` now supersedes; kept as-is.
 
