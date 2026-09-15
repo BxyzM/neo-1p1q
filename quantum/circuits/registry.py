@@ -5,16 +5,16 @@ Author: Aritra Bal (ETP)
 Date: 2026-09-09
 """
 from .base import Circuit
-from .vqc import VQCCircuit
+from .vqc import VQCCircuit, VQCExperimental001
 
-_REGISTRY = {'normal': VQCCircuit}
+_REGISTRY = {'normal': VQCCircuit, 'experimental_001': VQCExperimental001}
 
 
 def get(circuit_type: str, num_layers: int) -> Circuit:
     """Instantiate the registered circuit for `circuit_type`.
 
     Args:
-        circuit_type: registered circuit name (currently only 'normal').
+        circuit_type: registered circuit name ('normal' or 'experimental_001').
         num_layers: number of layers to construct the circuit with.
 
     Returns:
