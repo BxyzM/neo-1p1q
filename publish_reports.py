@@ -456,6 +456,8 @@ def _circuit_diagram_png(run_dir: Path, cfg: dict[str, Any]) -> bytes:
     aux = dict(circuit_impl.aux_defaults)
     for name in circuit_impl.aux_per_wire_names:
         aux[name] = [aux[name]] * wires
+    for name in circuit_impl.aux_per_pair_names:
+        aux[name] = [aux[name]] * (wires * (wires - 1) // 2)
     weights = CircuitWeights(rot=np.zeros((num_layers, wires, circuit_impl.operations_per_qubit)), aux=aux)
     dummy_inputs = np.zeros((1, wires * num_layers, 3))
 
