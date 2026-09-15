@@ -78,3 +78,68 @@ class VQCCircuit(CircuitBase):
                 f"hamiltonian_coeffs has {len(coeffs)} entries, circuit has {len(wires)} wires"
             )
         return qml.expval(qml.Hamiltonian(coeffs, obs))
+
+
+def ring_pairs(n_wires: int) -> List[tuple]:
+    """Nearest-neighbour ring pairs (w, (w+1) % n_wires), same order as entangle()."""
+    return [(w, (w + 1) % n_wires) for w in range(n_wires)]
+
+
+def pair_list(n_wires: int) -> List[tuple]:
+    """All unordered wire pairs (i, j), i < j."""
+    return [(i, j) for i in range(n_wires) for j in range(i + 1, n_wires)]
+
+
+class VQCExperimental001(VQCCircuit):
+    """
+    VQCCircuit plus a dR-conditioned IsingZZ ring after the CNOT ring, and a
+    readout extended from n trainable Z_i terms to n Z_i plus n*(n-1)/2
+    trainable Z_i Z_j pairwise terms (pairwise_coeffs).
+    """
+
+    aux_defaults = {
+        **VQCCircuit.aux_defaults,
+        'dr_scale': 1.0,
+        # One independent trainable coefficient per unordered wire pair, same
+        # broadcast treatment as hamiltonian_coeffs/dr_scale -- see
+        # aux_per_pair_names.
+        'pairwise_coeffs': 0.1,
+    }
+    aux_per_wire_names = ('hamiltonian_coeffs', 'dr_scale')
+    aux_per_pair_names = ('pairwise_coeffs',)
+
+    def build(
+        self, weights: CircuitWeights, inputs: np.ndarray, wires: List[int], measure_override=None,
+    ) -> qml.measurements.ExpectationMP:
+        dr_angle = weights.aux['dr_scale']
+        for layer in range(self.num_layers):
+            self.encode(weights, inputs, layer=layer, wires=wires)
+            self.entangle(wires)
+            for k, (i, j) in enumerate(ring_pairs(len(wires))):
+                d_eta = inputs[:, i, self.index['eta']] - inputs[:, j, self.index['eta']]
+                d_phi = inputs[:, i, self.index['phi']] - inputs[:, j, self.index['phi']]
+                delta_r = qml.math.sqrt(d_eta * d_eta + d_phi * d_phi + 1e-12)
+                qml.IsingZZ(dr_angle[k] * delta_r, wires=[i, j])
+            self.rotate(weights, layer=layer, wires=wires)
+        measure = measure_override or self.measure
+        return measure(weights, wires)
+
+    def measure(self, weights: CircuitWeights, wires: List[int]) -> qml.measurements.ExpectationMP:
+        n_wires = len(wires)
+        pairs = pair_list(n_wires)
+        z_coeffs = weights.aux['hamiltonian_coeffs']
+        if 'pairwise_coeffs' not in weights.aux:
+            raise ValueError(
+                "VQCExperimental001 requires 'pairwise_coeffs' in aux weights "
+                f"({len(pairs)} independent trainable coefficients, one per unordered wire "
+                "pair) -- missing from the provided weights. Add it via aux_weights, or check "
+                "circuit_type if resuming/evaluating a checkpoint trained with a different circuit."
+            )
+        pairwise_coeffs = weights.aux['pairwise_coeffs']
+        if len(z_coeffs) != n_wires:
+            raise ValueError(f"hamiltonian_coeffs has {len(z_coeffs)} entries, circuit has {n_wires} wires")
+        if len(pairwise_coeffs) != len(pairs):
+            raise ValueError(f"pairwise_coeffs has {len(pairwise_coeffs)} entries, circuit has {len(pairs)} wire pairs")
+        obs = [qml.PauliZ(i) for i in wires] + [qml.PauliZ(i) @ qml.PauliZ(j) for i, j in pairs]
+        coeffs = qml.math.stack(list(z_coeffs) + list(pairwise_coeffs))
+        return qml.expval(qml.Hamiltonian(coeffs, obs))
