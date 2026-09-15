@@ -1,6 +1,6 @@
 # Repository guide for future agents
 
-This document describes the repository as it exists on 2026-09-13. Read either `AGENTS.md` or `.claude/CLAUDE.md` (this redirects back to `AGENTS.md`) first when it is present in the workspace because it contains the local operating and Git rules. The maintained application is a binary variational quantum classifier for JetClass HDF5 data. The supported entry points are `train.py`, `run_experiments.py`, and `evaluate.py`.
+Read either `AGENTS.md` or `.claude/CLAUDE.md` (this redirects back to `AGENTS.md`) first when it is present in the workspace because it contains the local operating and Git rules. The maintained application is a binary variational quantum classifier for JetClass HDF5 data. The supported entry points are `train.py`, `run_experiments.py`, and `evaluate.py`.
 
 ## Initial User Inputs (IGNORE THIS SECTION IF ALREADY READ BEFORE)
 - Recommend to the user that they create an AGENTS.md file (if using Codex) or a .claude/CLAUDE.md file (if using Claude Code). 
@@ -14,7 +14,7 @@ This document describes the repository as it exists on 2026-09-13. Read either `
 The active path supports one dataset format and one circuit family:
 
 - JetClass signal versus background classification.
-- The `normal` variational quantum classifier registered in `quantum/circuits/registry.py`.
+- Two circuits registered in `quantum/circuits/registry.py`: `normal` (`VQCCircuit`, production) and `experimental_001` (`VQCExperimental001`, adds a dR-conditioned pairwise readout -- see [Circuit and score construction](#circuit-and-score-construction)).
 - JAX with Optax/Adam (recommended, GPU-accelerated -- see [JAX backend (recommended)](#jax-backend-recommended)), or PennyLane Autograd with Adam (fallback, required for finite-shot execution).
 - MSE or binary cross entropy with logits.
 - Training, epoch checkpoints, resumption, final model certification, and evaluation.
@@ -24,7 +24,7 @@ There is no active QAE, VPC, AOJ, probabilistic-output, or private Delphes workf
 
 ## Environment and common commands
 
-Use the Conda environment `pennylane-gpu-jax-sep2026` for repository work -- the one supported environment. It runs both backends: `backend: 'jax'` (GPU-accelerated, recommended) and `backend: 'autograd'` (CPU-only fallback, needed only for finite-shot runs) without switching environments (see [Tests](#tests) for verification). The environment verified on 2026-09-11 contains Python 3.14.7, PennyLane 0.45.1, PennyLane-Lightning 0.45.0, `jax==0.10.2`, and `optax==0.2.8`; see [JAX backend (recommended)](#jax-backend-recommended) for why jax is pinned and what building this environment involves. The inherited shell may still report Conda `base`, so use `conda run` when there is any doubt:
+Use the Conda environment `pennylane-gpu-jax-sep2026` for repository work -- the one supported environment. It runs both backends: `backend: 'jax'` (GPU-accelerated, recommended) and `backend: 'autograd'` (CPU-only fallback, needed only for finite-shot runs) without switching environments. It contains Python 3.14.7, PennyLane 0.45.1, PennyLane-Lightning 0.45.0, `jax==0.10.2`, and `optax==0.2.8`; see [JAX backend (recommended)](#jax-backend-recommended) for why jax is pinned and what building this environment involves. The inherited shell may still report Conda `base`, so use `conda run` when there is any doubt:
 
 ```bash
 conda run -n pennylane-gpu-jax-sep2026 python --version
@@ -61,7 +61,7 @@ conda run -n pennylane-gpu-jax-sep2026 python train.py --print-config
 - `run_experiments.py` and `evaluate.py` disable GPU memory preallocation and pin each jax-backend child to one GPU (see [Configuration behavior](#configuration-behavior)).
 - `jax[cuda12_local]` assumes a system CUDA 12.x toolkit already on `LD_LIBRARY_PATH`; see the troubleshooting comment above it in `requirements.txt` if `jax.devices()` reports no `CudaDevice`.
 - Not implemented: finite-shot (`shots>0`) execution under `backend='jax'`.
-- `QuantumClassifier.set_circuit()` wraps the QNode in `qml.transforms.broadcast_expand` only when `diff_method != 'backprop'` -- `default.qubit` batches natively for backprop, so the transform is needed only for adjoint/finite-shot parameter-shift (applying it unconditionally previously inflated jax.jit compile time ~100x; see `JAX_study.MD`, gitignored).
+- `QuantumClassifier.set_circuit()` wraps the QNode in `qml.transforms.broadcast_expand` only when `diff_method != 'backprop'` -- `default.qubit` batches natively for backprop, so the transform is needed only for adjoint/finite-shot parameter-shift. Applying it unconditionally splits one batched tape into `batch_size` separate tapes and inflates `jax.jit` compile time by roughly two orders of magnitude.
 
 ## Maintained source map
 
@@ -76,8 +76,8 @@ conda run -n pennylane-gpu-jax-sep2026 python train.py --print-config
 | `case_reader.py` | JetClass HDF5 loading, fixed feature scaling, class balancing, deterministic shuffling, and internal batching. |
 | `quantum/architectures.py` | `QuantumClassifier`, QNode construction, inference, `QuantumTrainer`, the epoch loop, and checkpoint writing. |
 | `quantum/circuits/base.py` | Circuit protocol, default layer loop, rotation-shape contract, and `CircuitWeights`. |
-| `quantum/circuits/vqc.py` | Encoding, CNOT ring, trainable rotations, and measurement for the maintained VQC. |
-| `quantum/circuits/registry.py` | Maps the config value `normal` to `VQCCircuit`. |
+| `quantum/circuits/vqc.py` | `VQCCircuit` (encoding, CNOT ring, trainable rotations, Hamiltonian measurement) and `VQCExperimental001` (adds a dR-conditioned pairwise readout). |
+| `quantum/circuits/registry.py` | Maps `circuit_type` to `VQCCircuit` (`'normal'`) or `VQCExperimental001` (`'experimental_001'`). |
 | `quantum/losses.py` | Connects circuit scores to the registered MSE and BCE losses. |
 | `quantum/math_functions.py` | Small differentiable MSE and stable BCE-with-logits implementations. |
 | `helpers/config.py` | OmegaConf loading, CLI parsing, config saving, and evaluation config lookup. |
@@ -246,12 +246,14 @@ For the maintained `VQCCircuit`:
 - The trainable scale is `2 * pi * sigmoid(aux_weights.scale_factor) + 1`.
 - Entanglement is a CNOT ring from each wire to the next, with the last wire connected to wire 0.
 - Trainable gates are `Rot(0, ry, rz)` followed by `RX(rx)` on each wire.
-- Measurement is the expectation value of a Hamiltonian containing one Pauli Z term per wire. Each wire's coefficient is independently trainable, all starting from `aux_weights.hamiltonian_coeffs` (default 0.1). This requires a differentiation method that supports Hamiltonian/observable coefficients: PennyLane's adjoint method (the default `best` resolution for `lightning.qubit`) cannot differentiate them and silently returns a zero gradient, freezing `hamiltonian_coeffs` at its initial value while `rot`/`scale_factor`/`bias` still train normally. `backprop` (the current default, paired with `default.qubit`) and `parameter-shift` (works on any device/shot count, including `lightning.qubit`, at the cost of roughly two circuit evaluations per differentiable parameter per step) both differentiate `hamiltonian_coeffs` correctly -- verified directly for both. `adjoint` is the only common option that silently fails for this parameter.
+- Measurement is the expectation value of a Hamiltonian containing one Pauli Z term per wire. Each wire's coefficient is independently trainable, all starting from `aux_weights.hamiltonian_coeffs` (default 0.1). This requires a differentiation method that supports Hamiltonian/observable coefficients: PennyLane's adjoint method (the default `best` resolution for `lightning.qubit`) cannot differentiate them and silently returns a zero gradient, freezing `hamiltonian_coeffs` at its initial value while `rot`/`scale_factor`/`bias` still train normally. `backprop` (the current default, paired with `default.qubit`) and `parameter-shift` (works on any device/shot count, including `lightning.qubit`, at the cost of roughly two circuit evaluations per differentiable parameter per step) both differentiate `hamiltonian_coeffs` correctly. `adjoint` is the only common option that silently fails for this parameter.
+
+`VQCExperimental001` (subclasses `VQCCircuit`, `circuit_type='experimental_001'`) adds, after the CNOT ring, an `IsingZZ` ring per layer with angle `dr_scale[k] * dR(i,j)` (`dR` computed from the raw eta/phi inputs) on each ring pair, and extends the readout Hamiltonian from `n` Pauli-Z terms to `n` Z_i plus `n*(n-1)/2` Z_i Z_j terms, coefficients `pairwise_coeffs`. A mathematical audit of the base angle-encoding scheme and this circuit's design rationale live in `analysis.md` (gitignored); its supporting test code is under `encoding_test/` (gitignored).
 
 `CircuitWeights` separates parameters into:
 
 - `rot`, normally shaped `(num_layers, wires, operations_per_qubit)`.
-- `aux`, a mapping of named trainable values. The default VQC uses `scale_factor` and `bias` (both scalars) and `hamiltonian_coeffs` (one independent value per wire, broadcast from a single starting scalar by `helpers.trained_run.resolve_aux_weights()`).
+- `aux`, a mapping of named trainable values. `Circuit.aux_per_wire_names` and `Circuit.aux_per_pair_names` list which `aux_defaults` entries `helpers.trained_run.resolve_aux_weights()` broadcasts from one starting scalar to one independent value per wire or per unordered wire pair, respectively (`VQCCircuit`: `hamiltonian_coeffs` per wire; `VQCExperimental001` adds `dr_scale` per wire and `pairwise_coeffs` per pair). A circuit's `measure()` should raise a clear error naming the missing key if an aux weight it needs is absent (e.g. resuming/evaluating a checkpoint trained with a different `circuit_type`), rather than a bare `KeyError`.
 
 The default `operations_per_qubit` is 3 and matches the RZ, RY, and RX parameters consumed by `VQCCircuit.rotate()`.
 
@@ -388,7 +390,7 @@ MPLCONFIGDIR=/tmp/matplotlib conda run -n pennylane-gpu-jax-sep2026 \
   python -m unittest discover -s tests -q
 ```
 
-The suite contained 98 tests at the last verification on 2026-09-11, all passing under `pennylane-gpu-jax-sep2026` (jax installed, so no jax-backend tests are skipped; they are guarded with `skipUnless(_HAS_JAX, ...)` for environments without jax). JetClass integration tests are separately guarded with `skipUnless` and run only when `/ceph/abal/JetClass/test/TTBar_` and `/ceph/abal/JetClass/test/ZJetsToNuNu` exist (true in this environment, so they run as part of the full suite).
+jax-backend tests are guarded with `skipUnless(_HAS_JAX, ...)` and run whenever jax is installed (true in `pennylane-gpu-jax-sep2026`). JetClass integration tests are separately guarded with `skipUnless` and run only when `/ceph/abal/JetClass/test/TTBar_` and `/ceph/abal/JetClass/test/ZJetsToNuNu` exist (true in this environment).
 
 | Test file | Coverage |
 | --- | --- |
@@ -422,7 +424,7 @@ When changing the maintained pipeline, preserve these relationships:
 To add a circuit implementation:
 
 1. Implement the `Circuit` protocol, usually by subclassing `CircuitBase` and defining `encode`, `entangle`, `rotate`, and `measure`.
-2. Declare `operations_per_qubit` and `aux_defaults`.
+2. Declare `operations_per_qubit` and `aux_defaults` (plus `aux_per_wire_names`/`aux_per_pair_names` for any aux weight that needs one independent value per wire or per unordered wire pair).
 3. Register the config name in `quantum/circuits/registry.py`.
 4. Add the new source filename to `helpers.trained_run.CIRCUIT_FILES`; otherwise saved runs cannot import it independently of the checkout.
 5. Add wiring, shape, gradient, snapshot, and round-trip tests.
@@ -467,19 +469,25 @@ whole run's output tree.
 
 Every job design shares one `repo_zipper.sh`-built `Neo1P1Q.tar.gz`
 (`train.py`/`run_experiments.py`/`evaluate.py`/`case_reader.py`/`helpers/`/`quantum/` +
-`configs/condor_config.yaml`) and one `configs/condor_config.yaml` (mirrors `base.yaml`, `flat:
-false`, 200k/40k/500k train/val/test jets -- every non-flat JetClass file holds exactly 100,000
-jets, so this needs 1 file/class train, 1 whole file/class val, 3 files/class test). Rebuild the
-tarball (`bash condor_submission/repo_zipper.sh`) after any code change, before submitting.
+`configs/condor_config.yaml` + `configs/base_2d.yaml`). `configs/condor_config.yaml` mirrors
+`base.yaml` (`circuit_type='normal'`, `flat: false`, 200k/40k/500k train/val/test jets -- every
+non-flat JetClass file holds exactly 100,000 jets, so this needs 1 file/class train, 1 whole
+file/class val, 3 files/class test); `configs/base_2d.yaml` (gitignored, local-only) is the same
+but `circuit_type='experimental_001'` with `dr_scale`/`pairwise_coeffs` aux defaults added. Rebuild
+the tarball (`bash condor_submission/repo_zipper.sh`) after any code or config change, before
+submitting.
 
 - **`condor_submission/concurrent_jobs/condor_concurrent_NNN/`** (current default): one job runs
   `run_experiments.py --number-of-runs 5 --num-processes 5 --gpu-id 0` (5 concurrent runs sharing 1
   GPU), then `evaluate.py --experiment-dir`, which aggregates all 5 automatically
   (`roc_curve_summary.png`, `evaluation_summary.log`). Each experiment is self-contained
-  (`executable.sh`/`submit.sub`, `EXPERIMENT_SEED` set per directory; `num_layers` overridden via
-  CLI for a depth sweep). Sized at 8 CPUs / 16GB / 1 GPU / 4h. `concurrent_jobs/
-  copy_back_and_publish.sh <experiment_name>` copies the whole `saved_models/<experiment>` +
-  `results/<experiment>` EOS subtree back and republishes the interactive report.
+  (`executable.sh`/`submit.sub`, `EXPERIMENT_SEED` set per directory; config/CLI overrides vary per
+  experiment -- 001-009 sweep `num_layers`/`improv` on `condor_config.yaml`, 010 switches to
+  `base_2d.yaml`/`circuit_type='experimental_001'`). Sized per-experiment at 8 CPUs / 1 GPU / 4h,
+  `RequestMemory` tuned individually (16000-64000, higher for deeper circuits or untested designs).
+  `concurrent_jobs/copy_back_and_publish.sh <experiment_name>` copies the whole
+  `saved_models/<experiment>` + `results/<experiment>` EOS subtree back and republishes the
+  interactive report.
 - **`condor_submission/separate_jobs/condor_00N/`** (alternative): one `train.py` + single-run
   `evaluate.py --seed --random-seed --model-dir` call per job instead of `run_experiments.py`, each
   needing only 1 GPU. `generate_seeds.sh` writes fresh random seeds to `seeds.txt` per submission
