@@ -143,3 +143,37 @@ class VQCExperimental001(VQCCircuit):
         obs = [qml.PauliZ(i) for i in wires] + [qml.PauliZ(i) @ qml.PauliZ(j) for i, j in pairs]
         coeffs = qml.math.stack(list(z_coeffs) + list(pairwise_coeffs))
         return qml.expval(qml.Hamiltonian(coeffs, obs))
+
+
+class VQCExperimental002(VQCExperimental001):
+    """
+    Like VQCExperimental001, but with no CNOT ring: entanglement comes
+    entirely from a dR-conditioned IsingZZ gate on every one of the
+    n*(n-1)/2 unordered wire pairs per layer (not just ring-adjacent pairs).
+    Readout is unchanged from VQCExperimental001 (n Z_i plus n*(n-1)/2
+    trainable Z_i Z_j pairwise terms).
+    """
+
+    aux_per_wire_names = ('hamiltonian_coeffs',)
+    aux_per_pair_names = ('dr_scale', 'pairwise_coeffs')
+
+    def entangle(self, wires: List[int]) -> None:
+        """No entangling gates here -- entanglement is the per-pair IsingZZ
+        block in build()."""
+        pass
+
+    def build(
+        self, weights: CircuitWeights, inputs: np.ndarray, wires: List[int], measure_override=None,
+    ) -> qml.measurements.ExpectationMP:
+        dr_angle = weights.aux['dr_scale']
+        pairs = pair_list(len(wires))
+        for layer in range(self.num_layers):
+            self.encode(weights, inputs, layer=layer, wires=wires)
+            for k, (i, j) in enumerate(pairs):
+                d_eta = inputs[:, i, self.index['eta']] - inputs[:, j, self.index['eta']]
+                d_phi = inputs[:, i, self.index['phi']] - inputs[:, j, self.index['phi']]
+                delta_r = qml.math.sqrt(d_eta * d_eta + d_phi * d_phi + 1e-12)
+                qml.IsingZZ(dr_angle[k] * delta_r, wires=[i, j])
+            self.rotate(weights, layer=layer, wires=wires)
+        measure = measure_override or self.measure
+        return measure(weights, wires)
