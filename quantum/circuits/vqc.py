@@ -92,9 +92,9 @@ def pair_list(n_wires: int) -> List[tuple]:
 
 class VQCExperimental001(VQCCircuit):
     """
-    VQCCircuit plus a dR-conditioned IsingZZ ring after the CNOT ring, and a
-    readout extended from n trainable Z_i terms to n Z_i plus n*(n-1)/2
-    trainable Z_i Z_j pairwise terms (pairwise_coeffs).
+    CNOT ring, then a dR-conditioned IsingZZ gate on each ring pair.
+    Readout: n trainable Z_i terms plus n*(n-1)/2 trainable Z_i Z_j pairwise
+    terms (pairwise_coeffs).
     """
 
     aux_defaults = {
@@ -147,19 +147,16 @@ class VQCExperimental001(VQCCircuit):
 
 class VQCExperimental002(VQCExperimental001):
     """
-    Like VQCExperimental001, but with no CNOT ring: entanglement comes
-    entirely from a dR-conditioned IsingZZ gate on every one of the
-    n*(n-1)/2 unordered wire pairs per layer (not just ring-adjacent pairs).
-    Readout is unchanged from VQCExperimental001 (n Z_i plus n*(n-1)/2
-    trainable Z_i Z_j pairwise terms).
+    No CNOT ring. Entanglement is a dR-conditioned IsingZZ gate on every
+    unordered wire pair per layer. Readout: n trainable Z_i terms plus
+    n*(n-1)/2 trainable Z_i Z_j pairwise terms (pairwise_coeffs).
     """
 
     aux_per_wire_names = ('hamiltonian_coeffs',)
     aux_per_pair_names = ('dr_scale', 'pairwise_coeffs')
 
     def entangle(self, wires: List[int]) -> None:
-        """No entangling gates here -- entanglement is the per-pair IsingZZ
-        block in build()."""
+        """No entangling gates; see build()."""
         pass
 
     def build(
