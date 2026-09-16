@@ -14,7 +14,7 @@ Read either `AGENTS.md` or `.claude/CLAUDE.md` (this redirects back to `AGENTS.m
 The active path supports one dataset format and one circuit family:
 
 - JetClass signal versus background classification.
-- Three circuits registered in `quantum/circuits/registry.py`: `normal` (`VQCCircuit`, production), `experimental_001` (`VQCExperimental001`, adds a dR-conditioned pairwise readout on top of the ring CNOT entangler), and `experimental_002` (`VQCExperimental002`, replaces the ring CNOT entirely with a dR-conditioned IsingZZ gate on every unordered wire pair) -- see [Circuit and score construction](#circuit-and-score-construction).
+- Four circuits registered in `quantum/circuits/registry.py`: `normal` (`VQCCircuit`, production), `experimental_001` (`VQCExperimental001`, adds a dR-conditioned pairwise readout on top of the ring CNOT entangler), `experimental_002` (`VQCExperimental002`, replaces the ring CNOT entirely with a dR-conditioned IsingZZ gate on every unordered wire pair), and `experimental_003` (`VQCExperimental003`, like `experimental_002` but with IsingYY instead of IsingZZ and an RX(scale_factor * pt)-only encoding, no eta/phi angle encoding) -- see [Circuit and score construction](#circuit-and-score-construction).
 - JAX with Optax/Adam (recommended, GPU-accelerated -- see [JAX backend (recommended)](#jax-backend-recommended)), or PennyLane Autograd with Adam (fallback, required for finite-shot execution).
 - MSE or binary cross entropy with logits.
 - Training, epoch checkpoints, resumption, final model certification, and evaluation.
@@ -76,8 +76,8 @@ conda run -n pennylane-gpu-jax-sep2026 python train.py --print-config
 | `case_reader.py` | JetClass HDF5 loading, fixed feature scaling, class balancing, deterministic shuffling, and internal batching. |
 | `quantum/architectures.py` | `QuantumClassifier`, QNode construction, inference, `QuantumTrainer`, the epoch loop, and checkpoint writing. |
 | `quantum/circuits/base.py` | Circuit protocol, default layer loop, rotation-shape contract, and `CircuitWeights`. |
-| `quantum/circuits/vqc.py` | `VQCCircuit` (encoding, CNOT ring, trainable rotations, Hamiltonian measurement), `VQCExperimental001` (adds a dR-conditioned pairwise readout on top of the CNOT ring), and `VQCExperimental002` (drops the CNOT ring, entangles via dR-conditioned IsingZZ on every unordered wire pair instead). |
-| `quantum/circuits/registry.py` | Maps `circuit_type` to `VQCCircuit` (`'normal'`), `VQCExperimental001` (`'experimental_001'`), or `VQCExperimental002` (`'experimental_002'`). |
+| `quantum/circuits/vqc.py` | `VQCCircuit` (encoding, CNOT ring, trainable rotations, Hamiltonian measurement), `VQCExperimental001` (adds a dR-conditioned pairwise readout on top of the CNOT ring), `VQCExperimental002` (drops the CNOT ring, entangles via dR-conditioned IsingZZ on every unordered wire pair instead), and `VQCExperimental003` (like `VQCExperimental002` but IsingYY instead of IsingZZ, and encoding is RX(scale_factor * pt) only). |
+| `quantum/circuits/registry.py` | Maps `circuit_type` to `VQCCircuit` (`'normal'`), `VQCExperimental001` (`'experimental_001'`), `VQCExperimental002` (`'experimental_002'`), or `VQCExperimental003` (`'experimental_003'`). |
 | `quantum/losses.py` | Connects circuit scores to the registered MSE and BCE losses. |
 | `quantum/math_functions.py` | Small differentiable MSE and stable BCE-with-logits implementations. |
 | `helpers/config.py` | OmegaConf loading, CLI parsing, config saving, and evaluation config lookup. |
@@ -251,6 +251,8 @@ For the maintained `VQCCircuit`:
 `VQCExperimental001` (subclasses `VQCCircuit`, `circuit_type='experimental_001'`) adds, after the CNOT ring, an `IsingZZ` ring per layer with angle `dr_scale[k] * dR(i,j)` (`dR` computed from the raw eta/phi inputs) on each ring pair, and extends the readout Hamiltonian from `n` Pauli-Z terms to `n` Z_i plus `n*(n-1)/2` Z_i Z_j terms, coefficients `pairwise_coeffs`. A mathematical audit of the base angle-encoding scheme and this circuit's design rationale live in `analysis.md` (gitignored); its supporting test code is under `encoding_test/` (gitignored).
 
 `VQCExperimental002` (subclasses `VQCExperimental001`, `circuit_type='experimental_002'`) removes the ring CNOT entirely (`entangle()` is a no-op) and instead applies a dR-conditioned `IsingZZ` gate, angle `dr_scale[k] * dR(i,j)`, to every one of the `n*(n-1)/2` unordered wire pairs per layer -- not just the 10 ring-adjacent pairs `VQCExperimental001` uses. Readout is unchanged from `VQCExperimental001` (inherited `measure()`: `n` Z_i plus `n*(n-1)/2` Z_i Z_j terms, coefficients `pairwise_coeffs`). Because `dr_scale` is now broadcast per pair (`n*(n-1)/2` values) rather than per wire, `VQCExperimental002` overrides `aux_per_wire_names`/`aux_per_pair_names` to move `dr_scale` from the former to the latter.
+
+`VQCExperimental003` (subclasses `VQCExperimental002`, `circuit_type='experimental_003'`) makes two further changes on top of `VQCExperimental002`'s all-pairs entangling structure: the dR-conditioned gate is `IsingYY` instead of `IsingZZ` (same angle formula, `dr_scale[k] * dR(i,j)`), and `encode()` drops the (eta, phi) angle encoding entirely -- each wire gets only a single `RX(scale_factor * pt)` rotation (no `RY` term). `dR` is still computed from the raw eta/phi inputs for the entangling gate's angle; only the per-wire encoding rotation changed. Readout, `aux_per_wire_names`, and `aux_per_pair_names` are all inherited unchanged from `VQCExperimental002`.
 
 `CircuitWeights` separates parameters into:
 
