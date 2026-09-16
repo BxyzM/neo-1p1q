@@ -177,3 +177,34 @@ class VQCExperimental002(VQCExperimental001):
             self.rotate(weights, layer=layer, wires=wires)
         measure = measure_override or self.measure
         return measure(weights, wires)
+
+
+class VQCExperimental003(VQCExperimental002):
+    """
+    No CNOT ring. Entanglement is a dR-conditioned IsingYY gate on every
+    unordered wire pair per layer. Encoding is a single RX(scale_factor * pt)
+    rotation per wire, no eta/phi. Readout: n trainable Z_i terms plus
+    n*(n-1)/2 trainable Z_i Z_j pairwise terms (pairwise_coeffs).
+    """
+
+    def encode(self, weights: CircuitWeights, inputs: np.ndarray, layer: int, wires: List[int]) -> None:
+        sf = 2 * np.pi * sigmoid(weights.aux['scale_factor']) + 1
+        for w in wires:
+            pt = inputs[:, w, self.index['pt']]
+            qml.RX(sf * pt, wires=w)
+
+    def build(
+        self, weights: CircuitWeights, inputs: np.ndarray, wires: List[int], measure_override=None,
+    ) -> qml.measurements.ExpectationMP:
+        dr_angle = weights.aux['dr_scale']
+        pairs = pair_list(len(wires))
+        for layer in range(self.num_layers):
+            self.encode(weights, inputs, layer=layer, wires=wires)
+            for k, (i, j) in enumerate(pairs):
+                d_eta = inputs[:, i, self.index['eta']] - inputs[:, j, self.index['eta']]
+                d_phi = inputs[:, i, self.index['phi']] - inputs[:, j, self.index['phi']]
+                delta_r = qml.math.sqrt(d_eta * d_eta + d_phi * d_phi + 1e-12)
+                qml.IsingYY(dr_angle[k] * delta_r, wires=[i, j])
+            self.rotate(weights, layer=layer, wires=wires)
+        measure = measure_override or self.measure
+        return measure(weights, wires)
