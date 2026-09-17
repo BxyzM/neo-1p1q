@@ -145,7 +145,11 @@ class TestReportPublication(unittest.TestCase):
         self.assertEqual(index["experiments"][0]["successful_runs"], 2)
         self.assertAlmostEqual(index["experiments"][0]["mean_auc"], 0.875)
         self.assertAlmostEqual(index["experiments"][0]["std_auc"], 0.125)
-        self.assertEqual(detail["summary"]["total_jets"], 8)
+        # Both runs evaluate the same underlying test jets (random_seed only
+        # reshuffles case_reader's deterministic selection) -- total_jets must
+        # report that shared count, not sum duplicate evaluations across runs.
+        self.assertEqual(detail["summary"]["total_jets"], 4)
+        self.assertEqual(detail["summary"]["jets_per_run"], 4)
         aggregate = detail["validation"]["aggregate"]
         self.assertEqual([point["epoch"] for point in aggregate], [0, 1])
         self.assertEqual([point["mean"] for point in aggregate], [0.5, 0.6])
