@@ -202,6 +202,18 @@ light/dark toggle). Experiment discovery (`publish_reports.py`) and the frontend
 validation/sort (`report_site/assets/app.js`) both accept any directory/id name, not just numeric
 ones -- numeric ids still sort newest-first by value, non-numeric ones sort after, alphabetically.
 
+The frontend also has a "Parameter sweep" page (`?view=sweep`, `renderSweepPage`/`buildSweepModel`
+in `app.js`): among experiments sharing every reported architecture field except one swept
+parameter (e.g. `num_layers`), it picks the largest such comparable group and plots mean test AUC
+against the swept value, one colored series per `circuit_type` found in that group (`circuit_type`
+is never treated as a fixed context field). A multi-select "Circuit type" chip row (an "All" chip
+plus one independently toggleable chip per available `circuit_type`, reusing the `.segmented`
+CSS pattern) lets the chart/summary be filtered down to a subset of those series; it only hides
+already-computed series and never changes which experiments form the comparable group. Selection
+is persisted in the `circuits` URL query param and reconciled (kept if still valid, else reset to
+"all") whenever the swept parameter changes, since the available circuit types can differ per
+parameter. The chip row hides itself when the current group has only one circuit type.
+
 Each experiment also gets one circuit diagram (`data/circuits/<id>.png`, structure only -- zero
 weights and dummy inputs traced through the run's own saved circuit snapshot via `qml.draw_mpl`,
 `style="black_white_dark"`), shared across all its runs since the circuit structure doesn't vary
