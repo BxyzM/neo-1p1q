@@ -14,7 +14,7 @@ Read either `AGENTS.md` or `.claude/CLAUDE.md` (this redirects back to `AGENTS.m
 The active path supports one dataset format and one circuit family:
 
 - JetClass signal versus background classification.
-- Four circuits registered in `quantum/circuits/registry.py`: `normal` (`VQCCircuit`, production), `experimental_001` (`VQCExperimental001`, adds a dR-conditioned pairwise readout on top of the ring CNOT entangler), `experimental_002` (`VQCExperimental002`, replaces the ring CNOT entirely with a dR-conditioned IsingZZ gate on every unordered wire pair), and `experimental_003` (`VQCExperimental003`, like `experimental_002` but with IsingYY instead of IsingZZ and an RX(scale_factor * pt)-only encoding, no eta/phi angle encoding) -- see [Circuit and score construction](#circuit-and-score-construction).
+- Four circuits registered in `quantum/circuits/registry.py`: `normal`, `experimental_001`, `experimental_002`, `experimental_003` -- see [Circuit and score construction](#circuit-and-score-construction) for what each one changes.
 - JAX with Optax/Adam (recommended, GPU-accelerated -- see [JAX backend (recommended)](#jax-backend-recommended)), or PennyLane Autograd with Adam (fallback, required for finite-shot execution).
 - MSE or binary cross entropy with logits.
 - Training, epoch checkpoints, resumption, final model certification, and evaluation.
@@ -76,8 +76,8 @@ conda run -n pennylane-gpu-jax-sep2026 python train.py --print-config
 | `case_reader.py` | JetClass HDF5 loading, fixed feature scaling, class balancing, deterministic shuffling, and internal batching. |
 | `quantum/architectures.py` | `QuantumClassifier`, QNode construction, inference, `QuantumTrainer`, the epoch loop, and checkpoint writing. |
 | `quantum/circuits/base.py` | Circuit protocol, default layer loop, rotation-shape contract, and `CircuitWeights`. |
-| `quantum/circuits/vqc.py` | `VQCCircuit` (encoding, CNOT ring, trainable rotations, Hamiltonian measurement), `VQCExperimental001` (adds a dR-conditioned pairwise readout on top of the CNOT ring), `VQCExperimental002` (drops the CNOT ring, entangles via dR-conditioned IsingZZ on every unordered wire pair instead), and `VQCExperimental003` (like `VQCExperimental002` but IsingYY instead of IsingZZ, and encoding is RX(scale_factor * pt) only). |
-| `quantum/circuits/registry.py` | Maps `circuit_type` to `VQCCircuit` (`'normal'`), `VQCExperimental001` (`'experimental_001'`), `VQCExperimental002` (`'experimental_002'`), or `VQCExperimental003` (`'experimental_003'`). |
+| `quantum/circuits/vqc.py` | `VQCCircuit`, `VQCExperimental001/002/003` -- see [Circuit and score construction](#circuit-and-score-construction). |
+| `quantum/circuits/registry.py` | Maps `circuit_type` (`'normal'`/`'experimental_001'`/`'002'`/`'003'`) to the matching class above. |
 | `quantum/losses.py` | Connects circuit scores to the registered MSE and BCE losses. |
 | `quantum/math_functions.py` | Small differentiable MSE and stable BCE-with-logits implementations. |
 | `helpers/config.py` | OmegaConf loading, CLI parsing, config saving, and evaluation config lookup. |
@@ -197,6 +197,10 @@ and replaces the experiment index last. Published data includes aggregate and in
 validation AUC and ROC curves (with a mean-AUC annotation on the ROC chart itself), and per-run
 classifier score distributions (a 30-bin signal/background density histogram, shown per seed only
 -- there is no aggregate view), but excludes raw event scores, labels, and local filesystem paths.
+`summary.total_jets` ("Evaluated jets" on the index card) is the shared per-run test-set size, not
+a sum across runs -- every run in an experiment evaluates the identical test jets (`case_reader.py`
+selection is deterministic by file/row; `random_seed` only reshuffles order), so summing would
+overcount the same jets once per run.
 The frontend (`report_site/assets/`) uses a dark theme by default (`color-scheme: dark`, no
 light/dark toggle). Experiment discovery (`publish_reports.py`) and the frontend's own id
 validation/sort (`report_site/assets/app.js`) both accept any directory/id name, not just numeric
@@ -233,11 +237,14 @@ setsid nohup bash <save_dir>/<seed>/run_command.sh </dev/null > <save_dir>/<seed
 disown
 ```
 
-Three verified pitfalls:
+Four verified pitfalls:
 
 - **`$!` does not capture the long-lived PID.** `setsid`'s own process exits immediately once it hands the child to the new session, so `$!` captures that transient PID, not `bash run_command.sh`. Find the real PID with `pgrep -f "bash <path to run_command.sh>"` and write that to `pipeline.pid`.
 - **`seed=001` on the CLI silently becomes the integer `1`.** OmegaConf infers dotlist value types from the raw string and drops the leading zero. Passing the literal string form -- the argv token `seed='001'` (write `seed=\'001\'` in a bash script so the shell delivers those quote characters) -- makes OmegaConf parse it as the string `'001'` instead.
 - **`publish_reports.py --results-dir` must equal the `dump` path used for training/evaluation.** `evaluate.py` writes `test_results.pickle` under `<dump>/<seed>/<random_seed>/`; `publish_reports.py` looks under `<results-dir>/<experiment_id>`. A `dump` override not mirrored in `--results-dir` makes the report step silently find no evaluation results for that experiment.
+- **No memory ceiling on these local jobs.** Only `taskset -c 0-19` (CPU pinning) is applied; there is no `ulimit`/cgroup capping host RAM, which is shared with everyone else on this machine. A silent, traceback-free death of every concurrent training process at the same epoch boundary, with an empty `pipeline.log`, is the signature of an external `SIGKILL` (most likely an OOM-kill) rather than a code bug -- check `logs.log` per seed for how far training actually got before concluding a crash without confirming the process is truly gone (`ps -eo pid,ppid,cmd | grep <path>`, not just `ps -p <remembered PID>`, since a stale/wrong PID can falsely look dead).
+
+Local experiments (`saved_models/001-014`, each with this same `run_command.sh`/`pipeline.log`/`pipeline.pid` pattern) established the working hyperparameter convention for the deeper experimental circuits: `base_2d.yaml` + `circuit_type=experimental_003`, the full 200k/40k/500k split (`flat=false` plus explicit `n_signal`/`n_background`/etc., since the file default is the smaller flat split), `improv=0.001`, `min_epochs=10`, `decay_patience=6`. `num_layers` has been tested locally up to 8; deeper GridKa runs (`num_layers` 16/32/64) are tracked under `condor_experimental_NNN` (see HTCondor Job Submission).
 
 ## Circuit and score construction
 
@@ -468,8 +475,42 @@ prefer `condor_q -af ...`.
 
 Reaching GridKa needs `+RemoteJob = True` and a valid proxy at `/home/abal/.globus/x509up` (check
 with `voms-proxy-info -all`, don't assume a path). With those plus `requirements =
-regexp("A100|V100", TARGET.GPUs_DeviceName)`, jobs match reliably. A single-GPU request matches
-within a few minutes; a multi-GPU request is much harder to match and no current design uses one.
+regexp("A100|V100", TARGET.GPUs_DeviceName)` (or `"A100"`/`"V100"` alone to target one type), jobs
+match reliably once a slot with free resources actually accepts this account (see the troubleshooting
+notes below) -- multi-GPU requests (`request_GPUs = 2`) work fine and are sometimes necessary (see
+`condor_experimental_NNN` below), contrary to earlier notes here claiming otherwise.
+
+### GPU pool troubleshooting
+
+`condor_gpu_analysis` (added to `~/.bashrc`) prints free/total GPUs per node, split by V100/A100,
+deduplicated by machine. Two things it won't tell you, both learned the hard way:
+
+- **Per-node owner allow-lists.** Some GridKa GPU nodes restrict `Start` to a fixed list of
+  usernames regardless of free resources (e.g. a node with 4/8 GPUs genuinely free still refuses
+  every job from an account not on its list). Check with
+  `condor_status -pool c03-001-140.gridka.de -constraint 'Machine=="<host>.gridka.de" &&
+  PartitionableSlot' -l | grep -m1 '^Start ='` -- a bare boolean expression naming specific
+  `Target.Owner` values (rather than a resource-based formula) means that node is restricted; ask
+  an admin to add the account rather than assuming a resource-sizing problem.
+- **V100 `GPUMemoryMB` is a flat per-node total, not scaled per GPU.** These nodes have 8 real,
+  separate physical GPUs (confirmed via distinct `DeviceUuid`/`DevicePciBusId` per slot, `Capability
+  = 7.0` -- Volta has no MIG/partitioning, so 8 slots really is 8 cards), but
+  `TotalSlotGPUMemoryMB` is declared as one GPU's worth (~32000) for the whole node instead of
+  `8x32000`. HTCondor's schedd-side default (`RequestGPUMemoryMB = TARGET.TotalSlotGPUMemoryMB`)
+  means the *first* job to claim any GPU on such a node consumes the entire declared pool,
+  starving the other 7 idle GPUs until that job finishes/drains. Confirmed by two different users'
+  1-GPU jobs each showing `GPUMemoryMB=32000` consumed while sibling dynamic slots showed
+  `GPUMemoryMB=0` free with `GPUs=7` still idle. Workaround: add `+RequestGPUMemoryMB = 1` (or any
+  small value) to `submit.sub` -- this only affects the memory-accounting bucket, not which
+  physical GPU gets assigned (that's the separate, correctly-behaving `GPUs`/device resource), so
+  it's safe. A100 nodes don't define `GPUMemoryMB` at all (`undefined`), so this bug is V100-only.
+- **GPU VRAM exhaustion is separate from `RequestMemory`.** `RequestMemory` only governs host RAM.
+  `concurrent_jobs`-style designs run 5 concurrent training processes sharing whatever GPUs the job
+  was granted (`--gpu-id` round-robins them via `CUDA_VISIBLE_DEVICES`); at deep `num_layers`, 5
+  processes sharing one 40GB A100 can exceed its VRAM (`CUDA_ERROR_OUT_OF_MEMORY` /
+  `jax.errors.JaxRuntimeError: RESOURCE_EXHAUSTED`) regardless of how much host RAM was requested.
+  Fix by requesting more GPUs (`request_GPUs = 2`+) and passing the matching comma-separated list
+  to both `run_experiments.py --gpu-id` and `evaluate.py --gpu-id`, not by raising `RequestMemory`.
 
 Data staging: `condor_submission/copy-eos.sh` stages the fixed 10-file JetClass subset to CERN EOS
 (`/eos/user/a/aritra/JetClass/...`) via `xrdcp`. Inside a job, `executable.sh` pulls the same files
@@ -485,13 +526,18 @@ whole run's output tree.
 
 Every job design shares one `repo_zipper.sh`-built `Neo1P1Q.tar.gz`
 (`train.py`/`run_experiments.py`/`evaluate.py`/`case_reader.py`/`helpers/`/`quantum/` +
-`configs/condor_config.yaml` + `configs/base_2d.yaml`). `configs/condor_config.yaml` mirrors
-`base.yaml` (`circuit_type='normal'`, `flat: false`, 200k/40k/500k train/val/test jets -- every
-non-flat JetClass file holds exactly 100,000 jets, so this needs 1 file/class train, 1 whole
-file/class val, 3 files/class test); `configs/base_2d.yaml` (gitignored, local-only) is the same
-but `circuit_type='experimental_001'` with `dr_scale`/`pairwise_coeffs` aux defaults added. Rebuild
-the tarball (`bash condor_submission/repo_zipper.sh`) after any code or config change, before
-submitting.
+`configs/condor_config.yaml` + `configs/base_2d.yaml`). `configs/condor_config.yaml`
+(`circuit_type='normal'`, `flat: false`, 200k/40k/500k train/val/test jets -- every non-flat
+JetClass file holds exactly 100,000 jets, so this needs 1 file/class train, 1 whole file/class
+val, 3 files/class test) and `configs/base_2d.yaml` (gitignored, local-only; `circuit_type=
+'experimental_001'`, `dr_scale`/`pairwise_coeffs` aux defaults added) differ in **two** fields, not
+one: circuit *and* `flat` (`base_2d.yaml` defaults `flat: true`, small 10k/2k/20k split). **Gotcha:**
+`copy-eos.sh` only ever stages the non-flat `train/val/test` layout to EOS, never `flat_train`/
+`flat_val`/`flat_test` -- any `base_2d.yaml`-based condor job must explicitly override
+`flat=false` (plus `n_signal`/`n_background`/etc. if the larger split is wanted) or every run
+crashes with `FileNotFoundError` for the flat splits (hit `condor_concurrent_010` and an early
+`condor_experimental_NNN` attempt both this session). Rebuild the tarball (`bash
+condor_submission/repo_zipper.sh`) after any code or config change, before submitting.
 
 - **`condor_submission/concurrent_jobs/condor_concurrent_NNN/`** (current default): one job runs
   `run_experiments.py --number-of-runs 5 --num-processes 5 --gpu-id 0` (5 concurrent runs sharing 1
@@ -499,11 +545,23 @@ submitting.
   (`roc_curve_summary.png`, `evaluation_summary.log`). Each experiment is self-contained
   (`executable.sh`/`submit.sub`, `EXPERIMENT_SEED` set per directory; config/CLI overrides vary per
   experiment -- 001-009 sweep `num_layers`/`improv` on `condor_config.yaml`, 010 switches to
-  `base_2d.yaml`/`circuit_type='experimental_001'`). Sized per-experiment at 8 CPUs / 1 GPU / 4h,
-  `RequestMemory` tuned individually (16000-64000, higher for deeper circuits or untested designs).
-  `concurrent_jobs/copy_back_and_publish.sh <experiment_name>` copies the whole
-  `saved_models/<experiment>` + `results/<experiment>` EOS subtree back and republishes the
-  interactive report.
+  `base_2d.yaml`/`circuit_type='experimental_001'` but never overrode `flat` and crashed every run
+  with `FileNotFoundError` for `flat_train`/`flat_val` -- see the `flat=false` gotcha below). Sized
+  per-experiment at 8 CPUs / 1 GPU / 4h, `RequestMemory` tuned individually (16000-64000, higher for
+  deeper circuits or untested designs). `concurrent_jobs/copy_back_and_publish.sh <experiment_name>`
+  copies the whole `saved_models/<experiment>` + `results/<experiment>` EOS subtree back and
+  republishes the interactive report.
+- **`condor_submission/concurrent_jobs/condor_experimental_NNN/`** (newer series, same
+  `run_experiments.py`+`evaluate.py` design as `condor_concurrent_NNN`): sweeps `num_layers` for
+  `circuit_type='experimental_003'` on `base_2d.yaml` at the full 200k/40k/500k split (matching
+  local `saved_models/011-014`'s config exactly -- `n_signal`/`n_background`/etc. and `flat=false`
+  must all be passed explicitly, since `base_2d.yaml` alone defaults to the smaller flat=true
+  split). `requirements` targets `A100` only (owner-restricted/occupied A100 nodes and a stuck
+  V100 drain made straight `A100|V100` unreliable this round -- see GPU pool troubleshooting
+  above). 001/002/003 = `num_layers` 8/16/32 at 8-10 CPUs and 40-112GB RAM; 001 was later redone at
+  `num_layers=64` with `request_GPUs=2` (`--gpu-id 0,1`) after 5-way concurrency on 1 GPU exceeded
+  40GB VRAM at that depth (see GPU pool troubleshooting above -- this was not a `RequestMemory`
+  problem).
 - **`condor_submission/separate_jobs/`** (alternative to `concurrent_jobs/`): one `train.py` +
   single-run `evaluate.py --seed --random-seed --model-dir` call per job instead of
   `run_experiments.py`, each needing only 1 GPU. Per job, `RANDOM_SEED` is the sole executable
