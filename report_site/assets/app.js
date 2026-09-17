@@ -145,6 +145,11 @@ function renderSweepPage(data) {
   document.title = "Neo1P1Q | Parameter sweep";
   const requested = params.get("param");
   const initialParam = SWEEP_PARAMS.some((entry) => entry.key === requested) ? requested : SWEEP_PARAMS[0].key;
+  const requestedCircuits = params.get("circuits");
+  // null means "no explicit filter yet" -- resolves to "every available circuit
+  // type" the first time renderCircuitChips sees a model.
+  let selectedTypes = requestedCircuits ? new Set(requestedCircuits.split(",").filter(Boolean)) : null;
+  let currentModel = null;
 
   app.innerHTML = `
     <a class="back-link" href="./"><span aria-hidden="true">&#8592;</span> All experiments</a>
@@ -162,29 +167,109 @@ function renderSweepPage(data) {
           `).join("")}
         </div>
       </div>
+      <div class="chart-toolbar" id="sweep-circuit-toolbar" hidden>
+        <strong>Circuit type</strong>
+        <div class="segmented" id="sweep-circuit-selector" role="group" aria-label="Circuit type"></div>
+      </div>
       <div class="chart" id="sweep-chart" role="img" aria-label="Parameter sweep plot"></div>
       <div id="sweep-summary"></div>
     </section>`;
 
-  renderSweep(experiments, initialParam);
+  // Only affects display: filters which of buildSweepModel's already-computed
+  // series get drawn/listed. Never changes which experiments form "the"
+  // comparable group -- that grouping happens once, inside buildSweepModel.
+  function applyCircuitFilter(paramInfo) {
+    const chartTarget = document.querySelector("#sweep-chart");
+    const summaryTarget = document.querySelector("#sweep-summary");
+    const filtered = {
+      ...currentModel,
+      series: selectedTypes
+        ? currentModel.series.filter((series) => selectedTypes.has(series.circuitType))
+        : currentModel.series,
+    };
+    if (!currentModel.empty && currentModel.series.length && !filtered.series.length) {
+      renderChartError(chartTarget, "No circuit type selected -- choose at least one above.");
+      summaryTarget.innerHTML = "";
+      return;
+    }
+    renderSweepChart(filtered, paramInfo);
+    renderSweepSummaryPanel(filtered, paramInfo);
+  }
+
+  function updateUrl(paramKey) {
+    const url = new URL(window.location.href);
+    url.searchParams.set("view", "sweep");
+    url.searchParams.set("param", paramKey);
+    const availableTypes = currentModel.series.map((series) => series.circuitType);
+    const isFiltered = selectedTypes && selectedTypes.size < availableTypes.length;
+    if (isFiltered) {
+      url.searchParams.set("circuits", [...selectedTypes].join(","));
+    } else {
+      url.searchParams.delete("circuits");
+    }
+    history.replaceState(null, "", url);
+  }
+
+  // Rebuilds the chip row for the circuit types present in the current
+  // swept-param's comparable group (this can differ per param), reconciling
+  // any previously selected types against the new set.
+  function renderCircuitChips(paramInfo) {
+    const toolbar = document.querySelector("#sweep-circuit-toolbar");
+    const selector = document.querySelector("#sweep-circuit-selector");
+    const availableTypes = currentModel.series.map((series) => series.circuitType);
+    if (availableTypes.length <= 1) {
+      toolbar.hidden = true;
+      selectedTypes = null;
+      return;
+    }
+    toolbar.hidden = false;
+    const overlap = selectedTypes ? availableTypes.filter((type) => selectedTypes.has(type)) : [];
+    selectedTypes = new Set(overlap.length ? overlap : availableTypes);
+
+    selector.innerHTML = `
+      <button type="button" data-circuit="__all__" aria-pressed="${selectedTypes.size === availableTypes.length}">All</button>
+      ${availableTypes.map((type) => `
+        <button type="button" data-circuit="${safeText(type)}" aria-pressed="${selectedTypes.has(type)}">${safeText(titleCase(type))}</button>
+      `).join("")}`;
+
+    const chips = [...selector.querySelectorAll("button")];
+    chips.forEach((chip) => {
+      chip.addEventListener("click", () => {
+        if (chip.dataset.circuit === "__all__") {
+          selectedTypes = new Set(availableTypes);
+        } else if (selectedTypes.has(chip.dataset.circuit)) {
+          selectedTypes.delete(chip.dataset.circuit);
+        } else {
+          selectedTypes.add(chip.dataset.circuit);
+        }
+        chips.forEach((item) => item.setAttribute(
+          "aria-pressed",
+          item.dataset.circuit === "__all__"
+            ? String(selectedTypes.size === availableTypes.length)
+            : String(selectedTypes.has(item.dataset.circuit)),
+        ));
+        updateUrl(paramInfo.key);
+        applyCircuitFilter(paramInfo);
+      });
+    });
+  }
+
+  function switchTo(paramKey) {
+    const paramInfo = SWEEP_PARAMS.find((entry) => entry.key === paramKey) ?? SWEEP_PARAMS[0];
+    currentModel = buildSweepModel(experiments, paramInfo.field);
+    renderCircuitChips(paramInfo);
+    updateUrl(paramInfo.key);
+    applyCircuitFilter(paramInfo);
+  }
+
+  switchTo(initialParam);
   const buttons = [...document.querySelectorAll("#sweep-param-selector button")];
   buttons.forEach((button) => {
     button.addEventListener("click", () => {
       buttons.forEach((item) => item.setAttribute("aria-pressed", String(item === button)));
-      const url = new URL(window.location.href);
-      url.searchParams.set("view", "sweep");
-      url.searchParams.set("param", button.dataset.param);
-      history.replaceState(null, "", url);
-      renderSweep(experiments, button.dataset.param);
+      switchTo(button.dataset.param);
     });
   });
-}
-
-function renderSweep(experiments, paramKey) {
-  const paramInfo = SWEEP_PARAMS.find((entry) => entry.key === paramKey) ?? SWEEP_PARAMS[0];
-  const model = buildSweepModel(experiments, paramInfo.field);
-  renderSweepChart(model, paramInfo);
-  renderSweepSummaryPanel(model, paramInfo);
 }
 
 // Groups experiments by every reported architecture field except the swept
