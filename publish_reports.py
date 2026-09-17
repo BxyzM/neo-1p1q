@@ -546,7 +546,18 @@ def build_experiment(experiment_dir: Path, results_dir: Path, output_dir: Path) 
 
     successful_runs = [run for run in runs if run["test_auc"] is not None]
     aucs = np.asarray([run["test_auc"] for run in successful_runs], dtype=float)
-    total_jets = sum(run["evaluation_jets"] for run in successful_runs)
+    # Every run in an experiment evaluates the same underlying test jets --
+    # random_seed only reshuffles case_reader's deterministic file/row
+    # selection, it doesn't change which jets are read (case_reader.py's
+    # _read_class/_materialise) -- so summing evaluation_jets across runs
+    # would overcount the same jets once per run instead of reporting the
+    # shared test-set size.
+    jets_per_run = (
+        successful_runs[0]["evaluation_jets"]
+        if successful_runs and len({run["evaluation_jets"] for run in successful_runs}) == 1
+        else None
+    )
+    total_jets = jets_per_run
     if runs and all(run["status"] == "complete" for run in runs):
         status = "complete"
     elif runs and (successful_runs or any(run["validation_auc"] for run in runs)):
@@ -593,11 +604,7 @@ def build_experiment(experiment_dir: Path, results_dir: Path, output_dir: Path) 
             "run_count": len(runs),
             "successful_runs": len(successful_runs),
             "total_jets": total_jets,
-            "jets_per_run": (
-                successful_runs[0]["evaluation_jets"]
-                if successful_runs and len({run["evaluation_jets"] for run in successful_runs}) == 1
-                else None
-            ),
+            "jets_per_run": jets_per_run,
             "mean_auc": float(np.mean(aucs)) if len(aucs) else None,
             "std_auc": float(np.std(aucs)) if len(aucs) else None,
         },
