@@ -17,6 +17,7 @@ import pennylane.numpy as np
 import pennylane as qml
 import helpers.utils as ut
 import case_reader as cr
+import jetgame_reader as jg
 import quantum.losses as loss
 import quantum.architectures as qc
 from quantum.circuits.base import CircuitWeights
@@ -82,9 +83,12 @@ def main(cfg: DictConfig):
     wandb_config = OmegaConf.to_container(cfg)
     for path_key in ('data_dir', 'save_dir', 'dump'):
         wandb_config.pop(path_key, None)
+    # TRAIN_WANDB_PROJECT/TRAIN_WANDB_ENTITY (see .env) redirect a checkout to
+    # its own W&B destination; unset, this keeps the shared default that
+    # tests/test_saved_run.py pins by literal value.
     wandb.init(
-        entity="aritrabal2-Karlsruhe Institute of Technology",
-        project="neo1P1Q",
+        entity=os.environ.get("TRAIN_WANDB_ENTITY", "aritrabal2-Karlsruhe Institute of Technology"),
+        project=os.environ.get("TRAIN_WANDB_PROJECT", "neo1P1Q"),
         config=wandb_config,
         name=run_str,
         notes=cfg.desc,
@@ -160,12 +164,17 @@ def main(cfg: DictConfig):
     VQC.print_training_params()
 
     # Load the data: balanced signal vs background, per the config keys.
-    # JetClass layout is <data_dir>/<split>/<sample>/<sample>_NNN.h5.
-    train_split = 'flat_train' if cfg.flat else 'train'
-    val_split = 'flat_val' if cfg.flat else 'val'
-    _class_files = lambda split, sample: sorted(glob.glob(os.path.join(cfg.data_dir, split, sample, '*.h5')))
-    train_sig, train_bg = _class_files(train_split, cfg.signal), _class_files(train_split, cfg.background)
-    val_sig, val_bg = _class_files(val_split, cfg.signal), _class_files(val_split, cfg.background)
+    # JetClass layout is <data_dir>/<split>/<sample>/<sample>_NNN.h5; JetGame is
+    # one cache file whose classes are selected by label (see jetgame_reader).
+    dataset = cfg.get('dataset', 'jetclass')
+    if dataset not in ('jetclass', 'jetgame'):
+        raise ValueError(f"dataset must be 'jetclass' or 'jetgame', got {dataset!r}")
+    if dataset == 'jetclass':
+        train_split = 'flat_train' if cfg.flat else 'train'
+        val_split = 'flat_val' if cfg.flat else 'val'
+        _class_files = lambda split, sample: sorted(glob.glob(os.path.join(cfg.data_dir, split, sample, '*.h5')))
+        train_sig, train_bg = _class_files(train_split, cfg.signal), _class_files(train_split, cfg.background)
+        val_sig, val_bg = _class_files(val_split, cfg.signal), _class_files(val_split, cfg.background)
     required_particles = len(VQC.auto_wires)
     num_particles = getattr(cfg, 'num_particles', required_particles)
     if num_particles < required_particles:
@@ -175,34 +184,50 @@ def main(cfg: DictConfig):
         )
     logger.info(f"Number of particles to load: {num_particles}")
 
-    if not (train_sig and train_bg and val_sig and val_bg):
-        raise FileNotFoundError(
-            f"Missing JetClass files under {cfg.data_dir} for signal='{cfg.signal}', "
-            f"background='{cfg.background}' (splits '{train_split}', '{val_split}')"
+    if dataset == 'jetgame':
+        task = cfg.get('task', 'top_vs_qcd')
+        logger.info(f"JetGame cache: {cfg.jetgame_cache} (task '{task}')")
+        logger.info(f"Training set: {cfg.n_signal} signal + {cfg.n_background} background jets from train/")
+        logger.info(f"Validation set: {cfg.n_signal_val} signal + {cfg.n_background_val} background jets from valid/")
+        _jetgame = lambda split, n_sig, n_bg: jg.JetGameDataLoader(
+            cache=cfg.jetgame_cache, split=split, task=task,
+            n_signal=n_sig, n_background=n_bg,
+            batch_size=cfg.batch_size,
+            input_shape=(num_particles, 3),
+            logger=logger,
+            seed=random_seed if random_seed is not None else 0,
         )
-    logger.info(f"Training set: {cfg.n_signal} '{cfg.signal}' + {cfg.n_background} '{cfg.background}' jets from {train_split}/")
-    logger.info(f"Validation set: {cfg.n_signal_val} '{cfg.signal}' + {cfg.n_background_val} '{cfg.background}' jets from {val_split}/")
+        train_loader = _jetgame('train', cfg.n_signal, cfg.n_background)
+        val_loader = _jetgame('valid', cfg.n_signal_val, cfg.n_background_val)
+    else:
+        if not (train_sig and train_bg and val_sig and val_bg):
+            raise FileNotFoundError(
+                f"Missing JetClass files under {cfg.data_dir} for signal='{cfg.signal}', "
+                f"background='{cfg.background}' (splits '{train_split}', '{val_split}')"
+            )
+        logger.info(f"Training set: {cfg.n_signal} '{cfg.signal}' + {cfg.n_background} '{cfg.background}' jets from {train_split}/")
+        logger.info(f"Validation set: {cfg.n_signal_val} '{cfg.signal}' + {cfg.n_background_val} '{cfg.background}' jets from {val_split}/")
 
-    train_loader = cr.OneP1QDataLoader(
-        signal_filelist=train_sig, background_filelist=train_bg,
-        n_signal=cfg.n_signal, n_background=cfg.n_background,
-        batch_size=cfg.batch_size,
-        input_shape=(num_particles, 3),
-        train=True,
-        normalize_pt=cfg.norm_pt,
-        logger=logger,
-        seed=random_seed if random_seed is not None else 0,
-    )
-    val_loader = cr.OneP1QDataLoader(
-        signal_filelist=val_sig, background_filelist=val_bg,
-        n_signal=cfg.n_signal_val, n_background=cfg.n_background_val,
-        batch_size=cfg.batch_size,
-        input_shape=(num_particles, 3),
-        train=False,
-        normalize_pt=cfg.norm_pt,
-        logger=logger,
-        seed=random_seed if random_seed is not None else 0,
-    )
+        train_loader = cr.OneP1QDataLoader(
+            signal_filelist=train_sig, background_filelist=train_bg,
+            n_signal=cfg.n_signal, n_background=cfg.n_background,
+            batch_size=cfg.batch_size,
+            input_shape=(num_particles, 3),
+            train=True,
+            normalize_pt=cfg.norm_pt,
+            logger=logger,
+            seed=random_seed if random_seed is not None else 0,
+        )
+        val_loader = cr.OneP1QDataLoader(
+            signal_filelist=val_sig, background_filelist=val_bg,
+            n_signal=cfg.n_signal_val, n_background=cfg.n_background_val,
+            batch_size=cfg.batch_size,
+            input_shape=(num_particles, 3),
+            train=False,
+            normalize_pt=cfg.norm_pt,
+            logger=logger,
+            seed=random_seed if random_seed is not None else 0,
+        )
 
     # Initialize Adam with either the configured settings or the saved settings.
     # The jax backend always builds the same wrapped-adam transformation --
