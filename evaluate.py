@@ -23,6 +23,7 @@ from omegaconf import OmegaConf
 from sklearn.metrics import roc_curve, roc_auc_score
 
 import case_reader as cr
+import jetgame_reader as jg
 import helpers.utils as ut
 import quantum.losses as loss
 from helpers.config import SINGLE_THREAD_ENV, parse_evaluation_args, run_directory
@@ -58,15 +59,26 @@ def main(config_path: str) -> dict[str, object]:
 
     cost_fn = loss.VQC_cost
 
-    test_split = 'flat_test' if cfg.flat else 'test'
-    _class_files = lambda sample: sorted(glob.glob(os.path.join(cfg.data_dir, test_split, sample, '*.h5')))
-    test_sig, test_bg = _class_files(cfg.signal), _class_files(cfg.background)
-    if not (test_sig and test_bg):
-        raise FileNotFoundError(
-            f"Missing JetClass files under {cfg.data_dir} for signal='{cfg.signal}', "
-            f"background='{cfg.background}' (split '{test_split}')"
+    # The saved config decides which reader to use, so a JetGame run evaluates
+    # against the cache's held-out test split without re-specifying anything.
+    dataset = cfg.get('dataset', 'jetclass')
+    if dataset not in ('jetclass', 'jetgame'):
+        raise ValueError(f"dataset must be 'jetclass' or 'jetgame', got {dataset!r}")
+    if dataset == 'jetclass':
+        test_split = 'flat_test' if cfg.flat else 'test'
+        _class_files = lambda sample: sorted(glob.glob(os.path.join(cfg.data_dir, test_split, sample, '*.h5')))
+        test_sig, test_bg = _class_files(cfg.signal), _class_files(cfg.background)
+        if not (test_sig and test_bg):
+            raise FileNotFoundError(
+                f"Missing JetClass files under {cfg.data_dir} for signal='{cfg.signal}', "
+                f"background='{cfg.background}' (split '{test_split}')"
+            )
+        logger.info(f"Test set: {cfg.n_signal_test} '{cfg.signal}' + {cfg.n_background_test} '{cfg.background}' jets from {test_split}/")
+    else:
+        logger.info(
+            f"Test set: {cfg.n_signal_test} signal + {cfg.n_background_test} background jets "
+            f"from test/ of {cfg.jetgame_cache} (task '{cfg.get('task', 'top_vs_qcd')}')"
         )
-    logger.info(f"Test set: {cfg.n_signal_test} '{cfg.signal}' + {cfg.n_background_test} '{cfg.background}' jets from {test_split}/")
 
     required_particles = len(VQC.auto_wires)
     num_particles = getattr(cfg, 'num_particles', required_particles)
@@ -76,16 +88,26 @@ def main(config_path: str) -> dict[str, object]:
             f"{required_particles} particles, but num_particles={num_particles}"
         )
 
-    test_loader = cr.OneP1QDataLoader(
-        signal_filelist=test_sig, background_filelist=test_bg,
-        n_signal=cfg.n_signal_test, n_background=cfg.n_background_test,
-        input_shape=(num_particles, 3),
-        train=False,
-        normalize_pt=cfg.norm_pt,
-        logger=logger,
-        seed=random_seed if random_seed is not None else 0,
-        batch_size=cfg.batch_size,
-    )
+    if dataset == 'jetgame':
+        test_loader = jg.JetGameDataLoader(
+            cache=cfg.jetgame_cache, split='test', task=cfg.get('task', 'top_vs_qcd'),
+            n_signal=cfg.n_signal_test, n_background=cfg.n_background_test,
+            input_shape=(num_particles, 3),
+            logger=logger,
+            seed=random_seed if random_seed is not None else 0,
+            batch_size=cfg.batch_size,
+        )
+    else:
+        test_loader = cr.OneP1QDataLoader(
+            signal_filelist=test_sig, background_filelist=test_bg,
+            n_signal=cfg.n_signal_test, n_background=cfg.n_background_test,
+            input_shape=(num_particles, 3),
+            train=False,
+            normalize_pt=cfg.norm_pt,
+            logger=logger,
+            seed=random_seed if random_seed is not None else 0,
+            batch_size=cfg.batch_size,
+        )
 
     costs, scores, labels = VQC.run_inference(test_loader, loss_fn=cost_fn, loss_type=cfg.loss)
 
