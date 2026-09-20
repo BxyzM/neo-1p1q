@@ -190,6 +190,115 @@ class CASEJetClassDataset(IterableDataset):
         return (len(self._data) + self.batch_size - 1) // self.batch_size
 
 
+class JetGameDataset(CASEJetClassDataset):
+    """Same output contract as CASEJetClassDataset, reading a JetGame HDF5 instead.
+
+    JetClass ships one file per class with a fixed (N, 100, 3) block of jet-relative
+    (eta, phi, pt). JetGame ships a single file holding every class, with ragged
+    constituent four-vectors indexed by an offset table and absolute detector angles,
+    so this reader has to do three things the JetClass path does not:
+
+      * slice the ragged block for each jet via ``constituents/offsets``,
+      * convert (E, px, py, pz) to (pt, eta, phi),
+      * subtract the jet axis and wrap delta-phi into [-pi, pi).
+
+    Everything after that -- keeping the n_qubits hardest, the pt/jet_pt or
+    fixed_rescale scaling, shuffling, batching -- is inherited unchanged, so both
+    datasets hand the circuit the same (N, n_qubits, 3) array in (eta, phi, pt) order.
+    """
+
+    LABELS = {'qcd': 0, 'w': 1, 'top': 2}
+
+    def __init__(self, path:str, split:str='train', signal:str='top', background:str='qcd',
+                 n_signal:int=10000, n_background:int=10000, batch_size:int=32,
+                 input_shape:tuple[int]=(10, 3), epsilon:float=1.0e-4, train:bool=True,
+                 normalize_pt:bool=True, logger=None, seed:int=0):
+        IterableDataset.__init__(self)
+        if signal not in self.LABELS or background not in self.LABELS:
+            raise ValueError(f"signal/background must be drawn from {sorted(self.LABELS)}")
+        self.path = str(path)
+        self.split = split
+        self.signal_label = self.LABELS[signal]
+        self.background_label = self.LABELS[background]
+        self.n_signal = int(n_signal)
+        self.n_background = int(n_background)
+        self.batch_size = batch_size
+        self.input_shape = input_shape
+        self.pt_index = ut.getIndex('particle', 'pt')
+        self.eta_index = ut.getIndex('particle', 'eta')
+        self.phi_index = ut.getIndex('particle', 'phi')
+        self.epsilon = epsilon
+        self.train = train
+        self.normalize_pt = normalize_pt
+        self.logger = logger
+        self.n_qubits = input_shape[0]
+        self.seed = seed
+        self._data, self._labels = self._materialise()
+
+    def _read_jets(self, handle, rows):
+        """(len(rows), n_qubits, 3) of (eta, phi, pt), jet-relative and rescaled."""
+        jets = handle[self.split]['jets']
+        constituents = handle[self.split]['constituents']['four_vectors']
+        counts = jets['n_constituents'][:].astype(nnp.int64)
+        starts = nnp.concatenate(([0], nnp.cumsum(counts))).astype(nnp.int64)
+        jet_kin = jets['kinematics'][:]          # (pt, eta, phi, mass, rapidity)
+
+        out = nnp.zeros((len(rows), self.n_qubits, 3), dtype=nnp.float64)
+        for position, jet in enumerate(rows):
+            jet = int(jet)
+            block = constituents[starts[jet]:starts[jet] + counts[jet]]
+            px, py, pz = block[:, 1], block[:, 2], block[:, 3]
+            pt = nnp.hypot(px, py)
+            keep = nnp.argsort(pt)[::-1][:self.n_qubits]
+            pt = pt[keep]
+            eta = nnp.arcsinh(nnp.divide(pz[keep], nnp.clip(pt, 1e-12, None)))
+            phi = nnp.arctan2(py[keep], px[keep])
+            jet_pt, jet_eta, jet_phi = jet_kin[jet, 0], jet_kin[jet, 1], jet_kin[jet, 2]
+            delta_eta = eta - jet_eta
+            delta_phi = (phi - jet_phi + nnp.pi) % (2 * nnp.pi) - nnp.pi
+            n = len(pt)
+            out[position, :n, self.eta_index] = delta_eta
+            out[position, :n, self.phi_index] = delta_phi
+            out[position, :n, self.pt_index] = pt / jet_pt if self.normalize_pt else pt
+        return out
+
+    def _read_class(self, label:int, n_target:int, out_label:int):
+        import h5py
+        with h5py.File(self.path, 'r') as handle:
+            labels = handle[self.split]['jets']['labels'][:]
+            rows = nnp.flatnonzero(labels == label)[:n_target]
+            self._log(f"Reading {len(rows)} '{[k for k, v in self.LABELS.items() if v == label][0]}' "
+                      f"jets from {self.split}; keeping the {self.n_qubits} hardest particles each")
+            data = self._read_jets(handle, rows)
+        if not self.normalize_pt:
+            data[..., self.pt_index] = self.fixed_rescale(data[..., self.pt_index], self.epsilon, 'pt')
+        data[..., self.eta_index] = self.fixed_rescale(data[..., self.eta_index], self.epsilon, 'eta')
+        data[..., self.phi_index] = self.fixed_rescale(data[..., self.phi_index], self.epsilon, 'phi')
+        return np.array(data), nnp.full(len(data), out_label, dtype=int)
+
+    def _materialise(self):
+        sig_data, sig_labels = self._read_class(self.signal_label, self.n_signal, 1)
+        bg_data, bg_labels = self._read_class(self.background_label, self.n_background, 0)
+        data = np.concatenate([sig_data, bg_data], axis=0)
+        labels = nnp.concatenate([sig_labels, bg_labels], axis=0)
+        idx = nnp.random.default_rng(self.seed).permutation(len(data))
+        data, labels = data[idx], labels[idx]
+        self._log(f"JetGame loader finished: {len(data)} jets read -- "
+                  f"{len(sig_data)} signal (label 1), {len(bg_data)} background (label 0)")
+        return data, labels
+
+
+def JetGameLoader(input_shape:tuple[int]=(10, 3), train:bool=True, **kwargs) -> DataLoader:
+    """DataLoader over a balanced JetGame signal/background split.
+
+    Pass `path` (the JetGame HDF5), optionally `split`, `signal`, `background`,
+    `n_signal`, `n_background`, `batch_size`, `normalize_pt`, `logger`, `seed`.
+    """
+    print(f"Will read only {input_shape[0]} particles per jet")
+    dset = JetGameDataset(input_shape=input_shape, train=train, **kwargs)
+    return DataLoader(dset, batch_size=None)
+
+
 def OneP1QDataLoader(input_shape:tuple[int]=(100, 3),train:bool=True,**kwargs) -> DataLoader:
     '''
     Build a DataLoader over a balanced signal/background CASEJetClassDataset.
