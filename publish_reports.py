@@ -169,9 +169,10 @@ def _config_groups(cfg: dict[str, Any]) -> dict[str, dict[str, Any]]:
     data = {
         key: cfg.get(key)
         for key in (
-            "signal", "background", "n_signal", "n_background",
+            "dataset", "signal", "background", "n_signal", "n_background",
             "n_signal_val", "n_background_val", "n_signal_test",
             "n_background_test", "flat", "norm_pt",
+            "jetsgame_pt_bin", "jetsgame_level",
         )
         if key in cfg
     }

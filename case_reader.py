@@ -46,6 +46,11 @@ class CASEJetClassDataset(IterableDataset):
     Yields:
         Tuple[np.ndarray, np.ndarray]: a batch of jets and their integer labels.
     """
+    #: Name used in this reader's log lines; subclasses reading another dataset override it.
+    LOADER_NAME = 'JetClass'
+    #: Source ranges fed to fixed_rescale. Overridden per dataset (see helpers.utils).
+    ASSUMED_LIMITS = ut.assumed_limits
+
     def __init__(self, signal_filelist:List[str], background_filelist:List[str],
                  n_signal:int, n_background:int, batch_size:int=32,
                  data_key='jetConstituentsList', feature_key='jetFeatures',
@@ -91,7 +96,7 @@ class CASEJetClassDataset(IterableDataset):
         min=ut.feature_limits[type]['min']
         max=ut.feature_limits[type]['max']
         max-=epsilon
-        assumed_limits=ut.assumed_limits
+        assumed_limits=self.ASSUMED_LIMITS
         if type not in ['pt','eta','phi']:
             raise NameError("Type must be either of [pt,eta,phi]")
         if self.logger is not None:
@@ -141,9 +146,13 @@ class CASEJetClassDataset(IterableDataset):
         jet_etaphipt[..., self.phi_index] = self.fixed_rescale(jet_etaphipt[..., self.phi_index], epsilon=self.epsilon, type='phi')
         return jet_etaphipt
 
+    def _class_name(self, filelist:List[str]) -> str:
+        """Label for this class in log lines; JetClass keeps one sample per directory."""
+        return os.path.basename(os.path.dirname(filelist[0])) if filelist else '?'
+
     def _read_class(self, filelist:List[str], n_target:int, label:int) -> Tuple[np.ndarray, np.ndarray]:
         """Read up to `n_target` jets across `filelist`, all tagged with `label`."""
-        name = os.path.basename(os.path.dirname(filelist[0])) if filelist else '?'
+        name = self._class_name(filelist)
         self._log(f"Reading up to {n_target} '{name}' jets (label {label}); keeping the {self.n_qubits} hardest particles each")
         chunks, count = [], 0
         for file_path in filelist:
@@ -169,7 +178,7 @@ class CASEJetClassDataset(IterableDataset):
 
         n_sig, n_bg = len(sig_data), len(bg_data)
         total = n_sig + n_bg
-        self._log(f"JetClass loader finished: {total} jets read -- {n_sig} signal (label 1), {n_bg} background (label 0)")
+        self._log(f"{self.LOADER_NAME} loader finished: {total} jets read -- {n_sig} signal (label 1), {n_bg} background (label 0)")
         if total:
             self._log(
                 f"  post-rescale ranges: pt [{float(data[..., self.pt_index].min()):.3f}, {float(data[..., self.pt_index].max()):.3f}], "

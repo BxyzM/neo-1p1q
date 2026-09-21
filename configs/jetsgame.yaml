@@ -1,21 +1,24 @@
-seed: 'base'
+seed: 'jetsgame_base'
 random_seed: 42
 
 # Data and outputs
-dataset: 'jetclass'
-signal: 'TTBar_'
-background: 'ZJetsToNuNu'
+dataset: 'jetsgame'
+signal: 'Top'
+background: 'QCD'
+jetsgame_pt_bin: '500GeV'
+jetsgame_level: 'truth'
 n_signal: 10000
 n_background: 10000
 n_signal_val: 2000
 n_background_val: 2000
 n_signal_test: 20000
 n_background_test: 20000
-flat: true
+flat: false
 norm_pt: true
-data_dir: '/ceph/abal/JetClass'
+# The directory on disk is spelled 'JetGame'; the dataset is JetsGame.
+data_dir: '/ceph/mbinder/JetGame/data-v1.0.0'
 save_dir: './saved_models'
-dump: '/ceph/abal/Neo1P1Q/results'
+dump: '/ceph/mbinder/Neo1P1Q/results'
 
 # Circuit
 wires: 10
@@ -44,4 +47,4 @@ loss: 'BCE'
 # Run control
 save: true
 resume: false
-desc: 'Training run'
+desc: 'JetsGame training run'

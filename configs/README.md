@@ -1,6 +1,6 @@
 # Configuration
 
-`base.yaml` is the default configuration for the JetClass variational quantum classifier. Both `train.py` and `evaluate.py` use the same schema. Training saves the resolved configuration with the model so that evaluation can rebuild the same circuit and data selection.
+`base.yaml` is the default configuration for the variational quantum classifier on JetClass; `jetsgame.yaml` is the equivalent for the JetsGame samples. Both `train.py` and `evaluate.py` use the same schema. Training saves the resolved configuration with the model so that evaluation can rebuild the same circuit and data selection.
 
 ## Loading and overriding values
 
@@ -71,16 +71,19 @@ python run_experiments.py \
 
 | Entry | Purpose |
 | --- | --- |
-| `signal` | JetClass sample directory assigned label 1. |
-| `background` | JetClass sample directory assigned label 0. |
+| `dataset` | Selects the reader and file layout: `jetclass` (default) or `jetsgame`. Configurations saved before this entry existed are read as `jetclass`. |
+| `signal` | Sample assigned label 1: a JetClass sample directory, or a JetsGame sample name (`Top`, `WW` or `QCD`). |
+| `background` | Sample assigned label 0, named the same way as `signal`. |
 | `n_signal`, `n_background` | Number of signal and background jets requested for training. |
 | `n_signal_val`, `n_background_val` | Number of jets requested for validation. |
 | `n_signal_test`, `n_background_test` | Number of jets requested for evaluation. |
 | `batch_size` | Number of jets in each training, validation, and evaluation batch. The last smaller batch is retained. |
-| `flat` | Uses `flat_train`, `flat_val`, and `flat_test` when `true`; otherwise uses `train`, `val`, and `test`. |
+| `flat` | JetClass only. Uses `flat_train`, `flat_val`, and `flat_test` when `true`; otherwise uses `train`, `val`, and `test`. JetsGame publishes no flattened splits, so `flat=true` is rejected with `dataset='jetsgame'` rather than silently reading the plain ones. |
+| `jetsgame_pt_bin` | JetsGame only. Jet transverse-momentum threshold of the sample: `200GeV`, `500GeV` (default) or `2TeV`. |
+| `jetsgame_level` | JetsGame only. Simulation level: `truth` (default, full simulation), `hadron` (no multiple interactions) or `parton` (no multiple interactions and no hadronisation). |
 | `norm_pt` | Divides constituent transverse momentum by the jet transverse momentum when `true`. When `false`, the loader applies its fixed scaling limits. |
 
-The loader expects this directory structure:
+With `dataset: 'jetclass'` the loader expects this directory structure:
 
 ```text
 <data_dir>/<split>/<signal>/*.h5
@@ -88,6 +91,28 @@ The loader expects this directory structure:
 ```
 
 Each HDF5 file must contain `jetConstituentsList` and `jetFeatures`. Constituents must be ordered by decreasing transverse momentum.
+
+With `dataset: 'jetsgame'` the splits are fixed directories holding one gzipped
+JSON-lines file per class:
+
+```text
+<data_dir>/train/<signal>_<jetsgame_pt_bin>[_<jetsgame_level>].json.gz
+<data_dir>/valid/valid_<signal>_<jetsgame_pt_bin>[_<jetsgame_level>].json.gz
+<data_dir>/test/test_<signal>_<jetsgame_pt_bin>[_<jetsgame_level>].json.gz
+```
+
+Each line is one jet: a list of `{"E","px","py","pz"}` four-momenta in GeV whose
+first element is the jet itself and whose remaining elements are its
+constituents, in no particular order. The reader converts them to `(eta, phi,
+pt)`, keeps the hardest `num_particles`, and expresses the angles relative to the
+jet axis. Jets with fewer constituents than `num_particles` are zero-padded, as
+JetClass's fixed-width block already is.
+
+`norm_pt=false` maps each feature from a fixed assumed range onto the circuit's
+range, and that assumed range is the jet radius: JetClass clusters anti-kt R=0.8
+jets and JetsGame R=1.0, so each dataset carries its own eta/phi window
+(`helpers.utils.assumed_limits` and `jetsgame_assumed_limits`). Change the window
+if you cluster at a different radius.
 
 The circuit consumes `wires * num_layers` particles per jet by default. Set `num_particles` to load more, but it cannot be smaller than that product.
 

@@ -110,4 +110,9 @@ jetFeatureNames=['jet_pt', 'jet_eta', 'jet_phi', 'jet_energy',
        'jet_tau3', 'jet_tau4']
 
 feature_limits={'eta':{'min':-nnp.pi,'max':nnp.pi},'phi':{'min':-nnp.pi,'max':nnp.pi},'pt':{'min':0,'max':1.0}}
+# Sample ranges the readers' fixed_rescale maps onto feature_limits. The eta/phi
+# entries are the jet radius: JetClass clusters anti-kt R=0.8 jets, JetsGame R=1.0,
+# so each dataset's constituents span a different jet-relative (eta, phi) window
+# and needs its own assumed range to land on [-pi, pi).
 assumed_limits={'pt':[1.0e-4,3000.],'eta':[-0.8,0.8],'phi':[-0.8,0.8]}
+jetsgame_assumed_limits={'pt':[1.0e-4,3000.],'eta':[-1.0,1.0],'phi':[-1.0,1.0]}

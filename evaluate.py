@@ -5,7 +5,6 @@ Author: Aritra Bal (ETP)
 Date: 2026-09-09
 """
 from collections import deque
-import glob
 import os
 import pathlib
 import signal
@@ -22,10 +21,10 @@ import numpy as np
 from omegaconf import OmegaConf
 from sklearn.metrics import roc_curve, roc_auc_score
 
-import case_reader as cr
 import helpers.utils as ut
 import quantum.losses as loss
 from helpers.config import SINGLE_THREAD_ENV, parse_evaluation_args, run_directory
+from helpers.data import build_loader, require_files, split_label
 from helpers.trained_run import CIRCUIT_FILES, load_trained_run
 
 
@@ -58,14 +57,8 @@ def main(config_path: str) -> dict[str, object]:
 
     cost_fn = loss.VQC_cost
 
-    test_split = 'flat_test' if cfg.flat else 'test'
-    _class_files = lambda sample: sorted(glob.glob(os.path.join(cfg.data_dir, test_split, sample, '*.h5')))
-    test_sig, test_bg = _class_files(cfg.signal), _class_files(cfg.background)
-    if not (test_sig and test_bg):
-        raise FileNotFoundError(
-            f"Missing JetClass files under {cfg.data_dir} for signal='{cfg.signal}', "
-            f"background='{cfg.background}' (split '{test_split}')"
-        )
+    test_split = split_label(cfg, 'test')
+    require_files(cfg, ('test',))
     logger.info(f"Test set: {cfg.n_signal_test} '{cfg.signal}' + {cfg.n_background_test} '{cfg.background}' jets from {test_split}/")
 
     required_particles = len(VQC.auto_wires)
@@ -76,15 +69,10 @@ def main(config_path: str) -> dict[str, object]:
             f"{required_particles} particles, but num_particles={num_particles}"
         )
 
-    test_loader = cr.OneP1QDataLoader(
-        signal_filelist=test_sig, background_filelist=test_bg,
-        n_signal=cfg.n_signal_test, n_background=cfg.n_background_test,
-        input_shape=(num_particles, 3),
-        train=False,
-        normalize_pt=cfg.norm_pt,
-        logger=logger,
+    test_loader = build_loader(
+        cfg, 'test', cfg.n_signal_test, cfg.n_background_test, num_particles,
+        batch_size=cfg.batch_size, train=False, logger=logger,
         seed=random_seed if random_seed is not None else 0,
-        batch_size=cfg.batch_size,
     )
 
     costs, scores, labels = VQC.run_inference(test_loader, loss_fn=cost_fn, loss_type=cfg.loss)

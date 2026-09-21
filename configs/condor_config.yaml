@@ -1,6 +1,7 @@
 seed: 'condor_001'
 
-# JetClass data and outputs
+# Data and outputs
+dataset: 'jetclass'
 signal: 'TTBar_'
 background: 'ZJetsToNuNu'
 n_signal: 100000

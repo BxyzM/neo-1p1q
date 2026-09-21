@@ -1,6 +1,6 @@
 # 1P1Q
 
-1P1Q trains and evaluates a variational quantum classifier on JetClass HDF5 data.
+1P1Q trains and evaluates a variational quantum classifier on jet constituents, read from either JetClass HDF5 files or the JetsGame gzipped JSON distribution.
 
 ## Installation
 
@@ -20,6 +20,12 @@ export WANDB_MODE=offline
 
 ## Data
 
+`dataset` selects the reader: `jetclass` (the default) or `jetsgame`. Either way the
+circuit receives the same `(batch, num_particles, 3)` block of jet-relative
+`(eta, phi, pt)`, so every other configuration entry means the same thing for both.
+
+### JetClass
+
 Arrange the JetClass files by split and class:
 
 ```text
@@ -36,6 +42,39 @@ Arrange the JetClass files by split and class:
 ```
 
 Each file must contain `jetConstituentsList` and `jetFeatures`. Constituents must be ordered by decreasing transverse momentum. For flattened samples, use `flat_train`, `flat_val`, and `flat_test` and set `flat=true`.
+
+### JetsGame
+
+JetsGame ships one gzipped JSON-lines file per class, pt bin and simulation level,
+under fixed split directories:
+
+```text
+<data_dir>/
+├── train/<sample>_<pt_bin>[_<level>].json.gz
+├── valid/valid_<sample>_<pt_bin>[_<level>].json.gz
+└── test/test_<sample>_<pt_bin>[_<level>].json.gz
+```
+
+`signal` and `background` are `Top`, `WW` or `QCD`; `jetsgame_pt_bin` is `200GeV`,
+`500GeV` or `2TeV`; `jetsgame_level` is `truth` (no filename suffix), `hadron` or
+`parton`. Each line is one jet, encoded as a list of `{"E","px","py","pz"}`
+four-momenta in GeV whose first element is the jet itself. The reader converts
+those to `(eta, phi, pt)`, keeps the hardest `num_particles` constituents, and
+subtracts the jet axis. `flat` is a JetClass-only option and is rejected here.
+
+The distribution is a git-lfs repository. An un-pulled file is a short text
+pointer rather than jet data; the reader says so and names the directory to run
+`git lfs pull` in.
+
+Train on it with the supplied configuration:
+
+```bash
+python train.py \
+  --config configs/jetsgame.yaml \
+  seed=jetsgame_001 \
+  random_seed=42 \
+  data_dir=/path/to/JetsGame/data-v1.0.0
+```
 
 ## Training
 

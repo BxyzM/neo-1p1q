@@ -21,6 +21,7 @@ _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEFAULT_CONFIG = os.path.join(_REPO_ROOT, "configs", "base.yaml")
 ORCHESTRATION_KEYS = ('number_of_runs', 'num_processes')
 SUPPORTED_BACKENDS = ('autograd', 'jax')
+SUPPORTED_DATASETS = ('jetclass', 'jetsgame')
 SINGLE_THREAD_ENV = {
     'OMP_NUM_THREADS': '1',
     'MKL_NUM_THREADS': '1',
@@ -79,6 +80,15 @@ def validate_training_config(cfg: DictConfig, require_random_seed: bool = False)
         raise ValueError(
             f"backend='{backend}' is not supported. Use one of {SUPPORTED_BACKENDS}."
         )
+    dataset = cfg.get('dataset', 'jetclass')
+    if dataset not in SUPPORTED_DATASETS:
+        raise ValueError(
+            f"dataset='{dataset}' is not supported. Use one of {SUPPORTED_DATASETS}."
+        )
+    # 'flat' selects the flattened JetClass splits; JetsGame ships no such variant,
+    # so accepting it would silently read the ordinary splits instead.
+    if dataset == 'jetsgame' and cfg.get('flat'):
+        raise ValueError("flat=true is a JetClass-only option and cannot be used with dataset='jetsgame'.")
     if 'random_seed' not in cfg or cfg.random_seed is None:
         if require_random_seed:
             raise ValueError('New training runs require an integer random_seed.')

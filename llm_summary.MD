@@ -12,9 +12,9 @@ Read either `AGENTS.md` or `.claude/CLAUDE.md` (this redirects back to `AGENTS.m
 
 ## Current scope
 
-The active path supports one dataset format and one circuit family:
+The active path supports two dataset formats and one circuit family:
 
-- JetClass signal versus background classification.
+- Signal versus background classification on JetClass (HDF5) or JetsGame (gzipped JSON lines), selected by `dataset` -- see [Data contract and preprocessing](#data-contract-and-preprocessing).
 - Four circuits registered in `quantum/circuits/registry.py`: `normal`, `experimental_001`, `experimental_002`, `experimental_003` -- see [Circuit and score construction](#circuit-and-score-construction) for what each one changes.
 - JAX with Optax/Adam (recommended, GPU-accelerated -- see [JAX backend (recommended)](#jax-backend-recommended)), or PennyLane Autograd with Adam (fallback, required for finite-shot execution).
 - MSE or binary cross entropy with logits.
@@ -72,9 +72,12 @@ conda run -n pennylane-gpu-jax-sep2026 python train.py --print-config
 | `run_experiments.py` | Repeated-run launcher. Freezes one resolved input configuration and starts runs with independently generated random seeds under bounded process parallelism. |
 | `evaluate.py` | Evaluation entry point. Evaluates one certified run or evaluates and aggregates every random-seed run beneath an experiment directory. |
 | `publish_reports.py` | Builds the static interactive report site from saved validation histories, configurations, and evaluation results. |
-| `configs/base.yaml` | Single default configuration for the JetClass VQC. |
+| `configs/base.yaml` | Default configuration for the JetClass VQC. |
+| `configs/jetsgame.yaml` | Same schema with the JetsGame dataset, sample names and data path filled in. |
 | `configs/README.md` | Detailed description of configuration fields and command line overrides. |
 | `case_reader.py` | JetClass HDF5 loading, fixed feature scaling, class balancing, deterministic shuffling, and internal batching. |
+| `jetsgame_reader.py` | JetsGame `.json.gz` decoding: four-vectors to jet-relative `(eta, phi, pt)`, hardest-constituent selection, path building. Subclasses `CASEJetClassDataset` and replaces only `_load_file`. |
+| `helpers/data.py` | Resolves `dataset` to a file layout and reader. `train.py` and `evaluate.py` locate and build every loader through it. |
 | `quantum/architectures.py` | `QuantumClassifier`, QNode construction, inference, `QuantumTrainer`, the epoch loop, and checkpoint writing. |
 | `quantum/circuits/base.py` | Circuit protocol, default layer loop, rotation-shape contract, and `CircuitWeights`. |
 | `quantum/circuits/vqc.py` | `VQCCircuit`, `VQCExperimental001/002/003` -- see [Circuit and score construction](#circuit-and-score-construction). |
@@ -83,7 +86,7 @@ conda run -n pennylane-gpu-jax-sep2026 python train.py --print-config
 | `quantum/math_functions.py` | Small differentiable MSE and stable BCE-with-logits implementations. |
 | `helpers/config.py` | OmegaConf loading, CLI parsing, config saving, and evaluation config lookup. |
 | `helpers/trained_run.py` | Circuit snapshots, fingerprints, checkpoint validation, final model validation, and saved-run reconstruction. |
-| `helpers/utils.py` | Feature index constants, `sigmoid()`, and general pickle helpers still used by training and evaluation. |
+| `helpers/utils.py` | Feature index constants, per-dataset assumed feature ranges, `sigmoid()`, and general pickle helpers still used by training and evaluation. |
 | `report_site/` | Static frontend (`index.html`, `assets/app.js`, `assets/styles.css`) rendered by `publish_reports.py`'s output; dark theme by default. |
 | `tests/` | Unit, integration, checkpoint, reconstruction, data-loader, and report-publication tests. |
 
@@ -93,23 +96,25 @@ The repository uses namespace packages and has no tracked `__init__.py` files un
 
 ```mermaid
 flowchart TD
-    A[configs/base.yaml and key=value overrides] --> B[train.py]
+    A[configs/base.yaml or configs/jetsgame.yaml plus key=value overrides] --> B[train.py]
     B --> C[Resolve config and create save_dir/seed/random_seed]
     C --> D[Save config.yaml and circuit snapshot]
-    D --> E[Build QuantumClassifier and JetClass loaders]
+    D --> E[Build QuantumClassifier and loaders via helpers/data.py]
     E --> F[QuantumTrainer epoch loop]
     F --> G[checkpoints/epNNNN.pickle]
     F --> H[trained_model.pickle]
     H --> I[evaluate.py]
     D --> I
     I --> J[Verify config, hashes, and weights]
-    J --> K[Load JetClass test split]
+    J --> K[Load the configured dataset's test split]
     K --> L[test_results.pickle and ROC plot]
 ```
 
 ## Data contract and preprocessing
 
-Training and evaluation locate files with this layout:
+`cfg.dataset` selects the layout and the reader. `helpers/data.py` owns that choice -- `train.py` and `evaluate.py` call `require_files()` once up front (so a missing validation or test split fails before the training split is read) and then `build_loader()` per split, and never touch a reader directly. A configuration without a `dataset` key reads as `jetclass`, so runs saved before the key existed still load.
+
+### JetClass (`dataset: 'jetclass'`, default)
 
 ```text
 <data_dir>/
@@ -120,12 +125,35 @@ Training and evaluation locate files with this layout:
 
 When `flat=true`, the split names are `flat_train`, `flat_val`, and `flat_test`. The default signal is `TTBar_` with label 1, and the default background is `ZJetsToNuNu` with label 0.
 
+### JetsGame (`dataset: 'jetsgame'`)
+
+```text
+<data_dir>/
+├── train/<sample>_<jetsgame_pt_bin>[_<jetsgame_level>].json.gz
+├── valid/valid_<sample>_<jetsgame_pt_bin>[_<jetsgame_level>].json.gz
+└── test/test_<sample>_<jetsgame_pt_bin>[_<jetsgame_level>].json.gz
+```
+
+Samples are `Top`, `WW`, `QCD`; pt bins `200GeV`, `500GeV`, `2TeV`; levels `truth` (no suffix), `hadron`, `parton`. Note the directory is `valid/`, not `val/`, and that the split prefix is repeated inside the filename. `flat=true` is rejected for this dataset because JetsGame publishes no flattened splits.
+
+Each line is one jet: a JSON list of `{"E","px","py","pz"}` four-momenta in GeV. **Element 0 is the jet itself, not a constituent** -- the remaining elements sum to it exactly, and `JetsGameDataset` verifies that per jet, because mistaking the two would shift every angle and drop the hardest particle. Three things differ from JetClass and are handled in `JetsGameDataset._load_file`:
+
+1. Constituents are `(E, px, py, pz)`, so pt/eta/phi are derived (`eta` is pseudorapidity `arcsinh(pz/pt)`, matching JetClass's convention rather than the rapidity the samples were clustered in).
+2. They arrive in **no** pt order, so the hardest `num_particles` are selected with a stable descending sort. The JetClass leading-slice shortcut does not apply.
+3. Angles are absolute, so the jet axis is subtracted and delta-phi wrapped into `[-pi, pi)`.
+
+Jets with fewer constituents than `num_particles` are zero-padded at the end, matching JetClass's fixed-width block. Reading is streamed and stops at the requested jet count; roughly 15k jets/s, so a 250k-jet test split costs tens of seconds per class. The files are git-lfs; an un-pulled one is a short text pointer, detected and reported with `git lfs pull` rather than surfacing as a decompression error.
+
+`JetsGameDataset` subclasses `CASEJetClassDataset` and overrides only `_load_file`, `_class_name`, `LOADER_NAME` and `ASSUMED_LIMITS`. Everything else -- scaling, balancing, shuffling, batching -- is the JetClass code path, so a change there affects both datasets.
+
 Each HDF5 file must contain:
 
 - `jetConstituentsList`, normally shaped `(N, 100, 3)`. The last axis is `(eta, phi, pt)`.
 - `jetFeatures`. Column 0 is used as the jet transverse momentum.
 
-`CASEJetClassDataset` performs the following work when it is constructed:
+### Shared preprocessing
+
+`CASEJetClassDataset` performs the following work when it is constructed (steps 3 and 4 are what `JetsGameDataset` replaces):
 
 1. Sorts the signal and background file lists.
 2. Reads only the leading rows still needed to reach each requested class count.
@@ -140,9 +168,11 @@ The config `seed` names an experiment and does not control randomness. `random_s
 With `norm_pt=false`, fixed assumed ranges are mapped to the circuit ranges:
 
 - pt: `[1e-4, 3000]` to `[0, 1)`.
-- eta and phi: `[-0.8, 0.8]` to approximately `[-pi, pi)`.
+- eta and phi: `[-0.8, 0.8]` (JetClass) or `[-1.0, 1.0]` (JetsGame) to approximately `[-pi, pi)`.
 
-Values are scaled but not clipped. With `norm_pt=true`, constituent pt is divided by jet pt while eta and phi still use fixed scaling.
+The eta/phi window is the jet radius -- JetClass clusters anti-kt R=0.8 jets, JetsGame R=1.0 -- so each reader carries its own range as the class attribute `ASSUMED_LIMITS` (`helpers.utils.assumed_limits` and `jetsgame_assumed_limits`). `fixed_rescale` reads that attribute, not the module global; a new dataset at a different radius sets its own rather than editing the shared one.
+
+Values are scaled but not clipped, so a constituent beyond the assumed window lands outside `[-pi, pi)` and wraps. Measured on 10k JetsGame test jets at `num_particles=10`, that is 0.007% of eta slots and no phi slots -- negligible, but the reason to keep `ASSUMED_LIMITS` matched to the jet radius rather than shared. With `norm_pt=true`, constituent pt is divided by jet pt while eta and phi still use fixed scaling.
 
 The circuit needs `wires` particles -- every layer feature-re-uploads the same particles (not a new group per layer). `num_particles` is an optional OmegaConf override. It defaults to `wires` and cannot be smaller.
 
@@ -420,7 +450,7 @@ MPLCONFIGDIR=/tmp/matplotlib conda run -n pennylane-gpu-jax-sep2026 \
   python -m unittest discover -s tests -q
 ```
 
-jax-backend tests are guarded with `skipUnless(_HAS_JAX, ...)` and run whenever jax is installed (true in `pennylane-gpu-jax-sep2026`). JetClass integration tests are separately guarded with `skipUnless` and run only when `/ceph/abal/JetClass/test/TTBar_` and `/ceph/abal/JetClass/test/ZJetsToNuNu` exist (true in this environment).
+jax-backend tests are guarded with `skipUnless(_HAS_JAX, ...)` and run whenever jax is installed (true in `pennylane-gpu-jax-sep2026`). JetClass integration tests are separately guarded with `skipUnless` and run only when `/ceph/abal/JetClass/test/TTBar_` and `/ceph/abal/JetClass/test/ZJetsToNuNu` exist (true in this environment). The JetsGame equivalent is guarded on `/ceph/mbinder/JetGame/data-v1.0.0/test/test_{Top,QCD}_500GeV.json.gz` (the directory on disk is spelled `JetGame`; the dataset is JetsGame) and overridable with `JETSGAME_DIR`; the rest of `test_jetsgame_reader.py` builds its own fixtures and needs no shared storage.
 
 | Test file | Coverage |
 | --- | --- |
@@ -430,6 +460,7 @@ jax-backend tests are guarded with `skipUnless(_HAS_JAX, ...)` and run whenever 
 | `test_circuit_weights_checkpoint.py` | Pickle round trip for structured rotation and auxiliary weights. |
 | `test_config.py` | Typed and nested OmegaConf overrides, random-seed validation, run paths, resume flag, config printing, and byte-stable save/load. |
 | `test_end_to_end.py` | Training, finite-shot reproducibility, sample-weighted partial batches, inference cardinality, checkpoints, Adam/optax resumption, jax jit-compiled training, and optional real JetClass loading. |
+| `test_jetsgame_reader.py` | JetsGame path building, four-vector decoding against known kinematics, hardest-constituent selection, delta-phi wrapping, zero padding, both scaling paths, git-lfs/non-gzip/missing-jet-header rejection, balancing and seeded shuffling, `helpers.data` dispatch, and optional real JetsGame loading. |
 | `test_evaluate_experiment.py` | Experiment discovery, incomplete-run logging, bounded evaluation parallelism, interruption, thread limits, GPU assignment, and aggregate ROC reporting. |
 | `test_publish_reports.py` | Report JSON structure, path redaction, aggregate/per-run plot data (score distributions, epoch/compile times), circuit diagrams, and trained-model aux weights. |
 | `test_run_experiments.py` | Launcher configuration ownership, random seed generation, concurrency limits, GPU round-robin assignment, failure handling, and interruption. |
@@ -441,7 +472,7 @@ Warnings about CUDA initialization or Autograd with NumPy 2 may appear in the lo
 
 When changing the maintained pipeline, preserve these relationships:
 
-- Data passed to the circuit has shape `(batch, num_particles, 3)`.
+- Data passed to the circuit has shape `(batch, num_particles, 3)`, in `(eta, phi, pt)` order, whichever dataset produced it.
 - Labels and scores flatten to one value per jet.
 - `operations_per_qubit` must match the parameters consumed by the circuit.
 - Every trainable value belongs in `CircuitWeights.rot` or `CircuitWeights.aux`.
@@ -450,6 +481,14 @@ When changing the maintained pipeline, preserve these relationships:
 - Resume checkpoints need full Adam accumulation, not weights alone.
 - Evaluation requires certified final weights and must continue to reject intermediate checkpoints.
 - Metrics must include every sample in partial final batches.
+
+To add a dataset format:
+
+1. Subclass `CASEJetClassDataset` and override `_load_file` to return `(M, num_particles, 3)` already scaled; override `ASSUMED_LIMITS` if the jets have a different radius, and `LOADER_NAME`/`_class_name` for readable logs. Reuse the inherited balancing, shuffling and batching rather than reimplementing them.
+2. Add the name to `helpers.config.SUPPORTED_DATASETS`, and reject the options that do not apply to it (as `flat` is for JetsGame) instead of ignoring them.
+3. Teach `helpers/data.py`'s `split_label`, `class_files` and `build_loader` about the layout. Do not branch on the dataset in `train.py` or `evaluate.py`.
+4. Add the reportable config keys to `publish_reports._config_groups`.
+5. Add decoding tests with self-built fixtures, plus a `skipUnless`-guarded test against the real files.
 
 To add a circuit implementation:
 
