@@ -197,7 +197,15 @@ class TestSavedRun(unittest.TestCase):
         )
         wandb = MagicMock()
         wandb.run.id = 'offline-test'
-        with patch.object(train, 'wandb', wandb), patch.object(train, 'logger'), \
+        # Pin the W&B destination to the shared default: train.py honours
+        # TRAIN_WANDB_PROJECT/TRAIN_WANDB_ENTITY, which a developer's .env may
+        # set, and this case asserts the fallback rather than local config.
+        env_without_overrides = {
+            key: value for key, value in os.environ.items()
+            if key not in ('TRAIN_WANDB_PROJECT', 'TRAIN_WANDB_ENTITY')
+        }
+        with patch.dict(os.environ, env_without_overrides, clear=True), \
+                patch.object(train, 'wandb', wandb), patch.object(train, 'logger'), \
                 patch.object(QuantumClassifier, 'from_config', side_effect=RuntimeError('stop before training')):
             with self.assertRaisesRegex(RuntimeError, 'stop before training'):
                 train.main(incoming)

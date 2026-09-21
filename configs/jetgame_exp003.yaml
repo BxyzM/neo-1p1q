@@ -1,0 +1,67 @@
+# JetGame + experiment003, for the top_vs_qcd and w_vs_qcd tasks.
+#
+# Differs from base.yaml in three ways: it reads the JetGame 1P1Q cache
+# (one file, classes chosen by label) instead of JetClass directories, it
+# selects the experimental_003 circuit, and it sets num_layers > 1 so that
+# same-particle reuploading is actually exercised -- every circuit here
+# re-encodes the inputs once per layer, so num_layers=1 uploads only once.
+#
+# Override `task` per run: top_vs_qcd or w_vs_qcd. Both are available in the
+# cache (train holds 500,000 jets each of QCD/W/Top; valid and test 50,000 each).
+
+seed: 'jetgame_exp003'
+random_seed: 42
+
+# JetGame data. `dataset: jetgame` switches train.py to jetgame_reader, which
+# selects classes by label and skips JetClass's fixed_rescale -- the cache is
+# already stored as (pt_fraction, delta_eta, delta_phi).
+dataset: 'jetgame'
+task: 'top_vs_qcd'
+jetgame_cache: '/home/hk-project-p0027888/uuwdo/data/one_p_one_q_10_500GeV.h5'
+n_signal: 10000
+n_background: 10000
+n_signal_val: 2000
+n_background_val: 2000
+n_signal_test: 20000
+n_background_test: 20000
+save_dir: './saved_models'
+dump: './results'
+
+# Unused by the jetgame path, kept so the shared schema still resolves.
+signal: 'TTBar_'
+background: 'ZJetsToNuNu'
+data_dir: '/home/hk-project-p0027888/uuwdo/data/JetClass'
+flat: false
+norm_pt: true
+
+# Circuit: experiment003 -- no CNOT ring, dR-conditioned IsingYY on every wire
+# pair, RX(scale_factor * pt) encoding, Z + ZZ trainable readout.
+wires: 10
+num_layers: 4
+shots: -1
+backend: 'jax'
+device_name: 'default.qubit'
+diff_method: 'backprop'
+circuit_type: 'experimental_003'
+operations_per_qubit: 3
+aux_weights:
+  scale_factor: 1.0
+  bias: 0.1
+  hamiltonian_coeffs: 0.1   # broadcast to one coefficient per wire (10)
+  dr_scale: 1.0             # broadcast to one coefficient per wire pair (45)
+  pairwise_coeffs: 0.1      # broadcast to one coefficient per wire pair (45)
+
+# Optimization
+batch_size: 100
+epochs: 25
+lr: 0.05
+improv: 0.01
+min_epochs: 3
+decay_rate: 0.5
+decay_patience: 2
+loss: 'BCE'
+
+# Run control
+save: true
+resume: false
+desc: 'JetGame experiment003 reuploading run'
